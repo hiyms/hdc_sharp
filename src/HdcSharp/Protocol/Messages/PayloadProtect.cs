@@ -9,6 +9,9 @@ internal sealed class PayloadProtect
 
     public HdcCommand Command { get; set; }
 
+    /// <summary>vCode 字段原值，解析后由帧层校验是否为 <see cref="HdcConstants.PayloadVCode"/>。</summary>
+    public ulong VCode { get; private set; }
+
     public byte[] Serialize()
     {
         var writer = new SerialWriter();
@@ -34,8 +37,10 @@ internal sealed class PayloadProtect
                     result.Command = (HdcCommand)reader.ReadVarint();
                     break;
                 case 3:
-                case 4:
                     _ = reader.ReadVarint();
+                    break;
+                case 4:
+                    result.VCode = reader.ReadVarint();
                     break;
                 default:
                     throw new HdcException($"PayloadProtect 不支持的字段号 {field}");
