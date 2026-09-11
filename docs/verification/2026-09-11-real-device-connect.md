@@ -151,3 +151,48 @@ cd D:/work/hdc_sharp && dotnet test tests/HdcSharp.Tests
 ### 新确认的协议事实
 
 **shell 载荷无任何包装结构**：全仓检索 `RawDataProtocol|raw_data_protocol` 命中数为 0（`developtools_hdc/src/` + `hdc_rust/src/`）——一次性 shell（1001）与交互式输入（2001）的载荷均为**原始字节**；输出经 `CMD_KERNEL_ECHO_RAW(10)` 下发；完成信号是 `CMD_KERNEL_CHANNEL_CLOSE` 载荷 `[1]`，无 `CMD_SHELL_EXIT` 命令（`src/common/task.cpp:49-58`）。
+
+---
+
+## 6. 真机文件传输验证与丢尾缺陷修复（Task 15a，同日追加）
+
+### 6.1 发现：文件尾部间歇丢失
+
+真机发送 500KB 文件时，设备侧偶发只落 491520B（丢最后一块）；98305B 偶发只落 98304B。
+
+**定位过程**：
+
+| 步骤 | 手段 | 结论 |
+|---|---|---|
+| 1 | 发件前 `rm -f` + 内容按尺寸区分 | 排除残留文件污染（首次测量有 3 例是污染） |
+| 2 | 同尺寸重复 4 轮 | 失败位置漂移 → **竞态**，非固定 off-by-one |
+| 3 | 出帧跟踪（`HdcConnection.SendAsync` 临时钩子） | **我们发出了全部 11 个 DATA 帧**（10×49152 + 8480 = 500000），发送侧无缺陷 |
+| 4 | 只发数据、**完全不发 FINISH**、等 3 秒 | **全部尺寸 100% 完整** → 丢尾由 FINISH 处理触发 |
+| 5 | 上游源码 | `src/common/file.cpp:647-668`：daemon 收到 `FILE_FINISH[1]` 立即 `CloseCtxFd`，不等挂起的 `uv_fs_write` 完成，回 `[0]` 且**不走 `TaskFinish`**（故也无 ECHO） |
+| 6 | 上游源码 | `src/common/transfer.cpp:291-302`：`closeNotify` **仅在写路径**设置 → **只有写端（从端）会在自身 IO 完成后主动发 `[1]`**；注释明示 *"you can't make Finish first, because Slave may not end"* |
+| 7 | 上游源码 | `src/common/file.cpp:647-668` `void HdcFile::WhenTransferFinish` 恒发 `[1]`；主端读取路径（`ProcressFileIORead`）完成时**不发** `[1]` |
+
+### 6.2 修复（`FileOperation`）
+
+1. **主端不再抢先发 `FILE_FINISH[1]`**：发完数据后等从端的 `[1]`，收到后回 `[0]`，再把从端的 `KERNEL_CHANNEL_CLOSE` 视为正常终结（新增 `AwaitSlaveFinishAsync`）
+2. **空文件补零长度 DATA 帧**：对齐上游主端"读到 0 字节仍发一次 `SendIOPayload(index, buf, 0)`"，从端写 0 字节命中 `req->result == 0` 完成分支
+3. 曾试验但**证伪**：追加零长度 EOF 标记到非空文件会让失败率上升（0 字节写触发 `req->result == 0` 提前完成分支）
+
+### 6.3 验证结果（真机）
+
+| 方向 | 尺寸 | 次数 | 结果 |
+|---|---|---|---|
+| 发送 | 49152 / 98304 / 49153 / 98305 / 147457 / 500000 | 6 尺寸 × 6 轮 = 36 | **0 失败**（sha256 逐一比对） |
+| 接收 | 0 / 1 / 49152 / 49153 / 98305 / 500000 / 1000000 | 7 尺寸 × 2 轮 = 14 | **0 失败**（sha256 逐一比对） |
+
+修复前的对照基线：同样 6 尺寸 × 4 轮 = 24 次中失败 8 次（约 33%）。
+
+### 6.4 回归保护
+
+`FakeDaemon` 的 sink 剧本改为忠实建模真机语义：
+- 写完成**延迟 20ms**（模拟 `uv_fs_write` 异步滞后），维护 `Written`（对应 daemon 的 `indexIO`）
+- 仅当 `Written >= fileSize` 时才主动发 `FILE_FINISH[1]`（对应 `ProcressFileIOWrite`）
+- 收到主端 `FILE_FINISH[1]` 且尚有挂起写 → **丢弃挂起块**并回 `[0]`（复现真机丢尾行为）
+
+验证有效性：把客户端回退为"抢先发 `[1]`"后，`FileTransferTests` **3 个用例失败**（round-trip / 整除边界 / 通道清理）；修复版本 151/151 通过。
+另更新 `SendFile_EmptyFile_Succeeds` 断言为空文件**应发且仅发一个零长度 DATA 帧**。

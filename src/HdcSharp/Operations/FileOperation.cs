@@ -52,8 +52,11 @@ internal static class FileOperation
             await device.Connection.SendAsync(channelId, HdcCommand.FileCheck, config.Serialize(), ct).ConfigureAwait(false);
             await AwaitBeginAsync(device, context, errors, ct).ConfigureAwait(false);
             await SendDataAsync(device, channelId, source, total, fileName, progress, ct).ConfigureAwait(false);
-            await device.Connection.SendAsync(channelId, HdcCommand.FileFinish, FinishOneFilePayload, ct).ConfigureAwait(false);
-            await AwaitFinishAckAsync(device, context, errors, ct).ConfigureAwait(false);
+            // 主端不得抢先发 FILE_FINISH[1]：daemon 收到 [1] 会立即 CloseCtxFd 而不等挂起的异步写完成，
+            // 导致文件尾部间歇丢失（真机实测 500KB 偶发只落 491520B）。协议顺序为——仅写端（从端）
+            // 在自身 IO 完成后设 closeNotify 并主动发 [1]，主端收到后回 [0]，从端随即 TaskFinish
+            // （ECHO + CHANNEL_CLOSE）。依据 src/common/transfer.cpp:291-302、src/common/file.cpp:647-668
+            await AwaitSlaveFinishAsync(device, context, errors, ct).ConfigureAwait(false);
             ThrowIfErrors(errors);
         }
         finally
@@ -143,6 +146,13 @@ internal static class FileOperation
 
             if (total == 0)
             {
+                // 空文件的完成信号：主端读取循环首次读到 0 字节时仍会发一个零长度 DATA 帧
+                // （ProcressFileIORead → SendIOPayload(index, buf, 0)），从端写 0 字节的回调
+                // 命中 req->result == 0 完成分支，才会回 FILE_FINISH[1]
+                WriteSlot(buffer, 0, 0);
+                await device.Connection
+                    .SendAsync(channelId, HdcCommand.FileData, buffer.AsMemory(0, HdcConstants.TransferSlotSize), ct)
+                    .ConfigureAwait(false);
                 progress?.Report(new FileProgress(0, 0, fileName));
             }
         }
@@ -168,6 +178,39 @@ internal static class FileOperation
                 case HdcCommand.KernelChannelClose:
                     ThrowIfErrors(errors);
                     throw new HdcException("FILE_BEGIN 到达前通道被对端关闭（设备可能拒绝写入目标路径）");
+                default:
+                    break;
+            }
+        }
+    }
+
+    private static async Task AwaitSlaveFinishAsync(
+        HdcDevice device, ChannelContext context, List<string> errors, CancellationToken ct)
+    {
+        bool replied = false;
+        while (true)
+        {
+            Frame frame = await ReadFrameOrThrowAsync(device, context, errors, "等待 FILE_FINISH", ct).ConfigureAwait(false);
+            switch (frame.Command)
+            {
+                case HdcCommand.FileFinish when !IsAllFinished(frame.Payload):
+                    if (!replied)
+                    {
+                        await device.Connection
+                            .SendAsync(frame.ChannelId, HdcCommand.FileFinish, FinishAllPayload, ct)
+                            .ConfigureAwait(false);
+                        replied = true;
+                    }
+
+                    break;
+                case HdcCommand.FileFinish:
+                    return;
+                case HdcCommand.KernelEcho when IsFailLevel(frame.Payload):
+                    errors.Add(DecodeEchoText(frame.Payload));
+                    break;
+                case HdcCommand.KernelChannelClose:
+                    ThrowIfErrors(errors);
+                    return;
                 default:
                     break;
             }

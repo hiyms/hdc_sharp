@@ -104,6 +104,21 @@ public sealed class FakeDaemon : IDisposable
         public bool PushPending { get; set; }
 
         public long Received { get; set; }
+
+        /// <summary>从端待收的总字节数（真机 daemon 以 indexIO>=fileSize 判定自身 IO 完成）。</summary>
+        public long FileSize { get; set; }
+
+        /// <summary>从端是否已因自身 IO 完成而发出过 FILE_FINISH[1]。</summary>
+        public bool SlaveFinished { get; set; }
+
+        /// <summary>已收到但尚未落盘的一块（模拟真机 daemon uv_fs_write 的异步滞后）。</summary>
+        public (long Index, byte[] Data)? Pending { get; set; }
+
+        /// <summary>延迟落盘任务：模拟写完成回调晚于下一帧到达。</summary>
+        public Task? PendingFlush { get; set; }
+
+        /// <summary>已真正落盘的字节数（真机 daemon 的 indexIO）。</summary>
+        public long Written { get; set; }
     }
 
     /// <summary>在回环随机端口上启动假 daemon，并立即开始接受连接。</summary>
@@ -399,7 +414,7 @@ public sealed class FakeDaemon : IDisposable
                 return await PushFileDataAsync(stream, frame.ChannelId, beginState, ct);
             case HdcCommand.FileData when fileStates.TryGetValue(frame.ChannelId, out FileTaskState? dataState) &&
                                           dataState.Kind == FileTaskKind.Sink:
-                WriteSinkData(frame, dataState);
+                await WriteSinkDataAsync(stream, frame, dataState, ct);
                 return true;
             case HdcCommand.FileFinish when fileStates.TryGetValue(frame.ChannelId, out FileTaskState? finishState) &&
                                             finishState.Kind == FileTaskKind.Push:
@@ -442,12 +457,13 @@ public sealed class FakeDaemon : IDisposable
         {
             Kind = FileTaskKind.Sink,
             Sink = new FileStream(target, System.IO.FileMode.Create, FileAccess.Write, FileShare.Read),
+            FileSize = (long)config.FileSize,
         };
         await SendFrameAsync(stream, frame.ChannelId, HdcCommand.FileBegin, _options.FileBeginPayload ?? [], ct);
         return true;
     }
 
-    private static void WriteSinkData(Frame frame, FileTaskState state)
+    private async Task WriteSinkDataAsync(NetworkStream stream, Frame frame, FileTaskState state, CancellationToken ct)
     {
         if (frame.Payload.Length < HdcConstants.TransferSlotSize || state.Sink is null)
         {
@@ -461,30 +477,78 @@ public sealed class FakeDaemon : IDisposable
             return;
         }
 
-        state.Sink.Seek((long)head.Index, SeekOrigin.Begin);
-        state.Sink.Write(frame.Payload, HdcConstants.TransferSlotSize, size);
+        // 真机 daemon 的 uv_fs_write 是异步的：写完成回调晚于后续帧到达。此处把每块延后一小段
+        // 时间落盘，从而确定性地重现「主端抢先发 FILE_FINISH[1] → daemon 立即关 fd → 挂起写丢失」的丢尾
+        FlushPending(state);
+        state.Pending = ((long)head.Index, frame.Payload[HdcConstants.TransferSlotSize..(HdcConstants.TransferSlotSize + size)]);
         state.Received += size;
+        state.PendingFlush = CompletePendingAfterDelayAsync(stream, frame.ChannelId, state);
+    }
+
+    private async Task CompletePendingAfterDelayAsync(NetworkStream stream, uint channelId, FileTaskState state)
+    {
+        await Task.Delay(20, _cts.Token).ConfigureAwait(false);
+        FlushPending(state);
+        if (!state.SlaveFinished && state.Written >= state.FileSize)
+        {
+            state.SlaveFinished = true;
+            await SendFrameAsync(stream, channelId, HdcCommand.FileFinish, [1], _cts.Token).ConfigureAwait(false);
+        }
+    }
+
+    private static void FlushPending(FileTaskState state)
+    {
+        if (state.Pending is not { } pending || state.Sink is null)
+        {
+            state.Pending = null;
+            return;
+        }
+
+        state.Sink.Seek(pending.Index, SeekOrigin.Begin);
+        state.Sink.Write(pending.Data);
+        state.Written += pending.Data.Length;
+        state.Pending = null;
     }
 
     private async Task<bool> HandleSinkFinishAsync(NetworkStream stream, Frame frame, FileTaskState state, CancellationToken ct)
     {
-        if (frame.Payload.Length == 0 || frame.Payload[0] != 1 || !_options.FileAcknowledgeFinish)
+        if (frame.Payload.Length == 0 || !_options.FileAcknowledgeFinish)
         {
             return true;
         }
 
-        state.Sink?.Flush();
-        state.Sink?.Dispose();
-        state.Sink = null;
-        await SendFrameAsync(stream, frame.ChannelId, HdcCommand.FileFinish, [1], ct);
-        await SendFrameAsync(stream, frame.ChannelId, HdcCommand.FileFinish, [0], ct);
+        if (frame.Payload[0] == 1)
+        {
+            // 模拟真机 daemon 收到主端 FILE_FINISH[1] 的行为：立即 CloseCtxFd 不等挂起写完成，
+            // 回 [0] 且不走 TaskFinish（src/common/file.cpp:647-668）。主端不应抢先发 [1]——
+            // 抢先发会丢弃尚未落盘的尾块，正是该剧本要抓的回归
+            state.PendingFlush = null;
+            state.Pending = null;
+            CloseSink(state);
+            await SendFrameAsync(stream, frame.ChannelId, HdcCommand.FileFinish, [0], ct);
+            return true;
+        }
+
+        // 主端回 [0] → 从端 TransferSummary + TaskFinish（ECHO + CHANNEL_CLOSE）
+        state.PendingFlush = null;
+        FlushPending(state);
+        CloseSink(state);
         byte[] text = Encoding.UTF8.GetBytes(
             $"FileTransfer finish, Size:{state.Received}, File count = 1, time:0ms rate:0.00kB/s");
         byte[] echo = new byte[text.Length + 1];
         echo[0] = (byte)MessageLevel.Ok;
         text.CopyTo(echo, 1);
         await SendFrameAsync(stream, frame.ChannelId, HdcCommand.KernelEcho, echo, ct);
+        await SendFrameAsync(stream, frame.ChannelId, HdcCommand.FileFinish, [1], ct);
+        await SendFrameAsync(stream, frame.ChannelId, HdcCommand.KernelChannelClose, [1], ct);
         return true;
+    }
+
+    private static void CloseSink(FileTaskState state)
+    {
+        state.Sink?.Flush();
+        state.Sink?.Dispose();
+        state.Sink = null;
     }
 
     private async Task<bool> PushFileDataAsync(NetworkStream stream, uint channelId, FileTaskState state, CancellationToken ct)

@@ -129,9 +129,12 @@ public class FileTransferTests : IDisposable
 
         Assert.Empty(await File.ReadAllBytesAsync(Path.Combine(_dst, "empty.bin")));
         Frame checkFrame = Assert.Single(daemon.ReceivedFrames, f => f.Command == HdcCommand.FileCheck);
-        Assert.DoesNotContain(
+        // 空文件仍需一个零长度 DATA 帧作为从端完成信号（对齐上游 ProcressFileIORead 的 0 字节读分支）
+        Frame marker = Assert.Single(
             daemon.ReceivedFrames,
             f => f.ChannelId == checkFrame.ChannelId && f.Command == HdcCommand.FileData);
+        Assert.Equal(HdcConstants.TransferSlotSize, marker.Payload.Length);
+        Assert.Equal(0u, TransferPayload.ParseSlot(marker.Payload).CompressSize);
     }
 
     [Fact]

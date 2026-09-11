@@ -233,16 +233,24 @@ tests\HdcSharp.Tests\（Protocol 黄金向量 · FakeDaemon · Operations 回环
 
 #### 4.7.1 发送单文件（host→device）
 
-1. H→D `FILE_INIT(3000)`，载荷=ASCII 参数串 `"send <opts> <local> <remote>"`（-opts：`-a` 保留时间戳/`-sync` 仅当较新/`-cwd <dir>`；一期不实现 `-m` 模式同步与 `-b` 沙箱）
-   - daemon 回 `WAKEUP_SLAVETASK(12)` 空载荷 → 忽略
+> **已按上游源码与真机实测修正（2026-09-11）**。原描述误把 host-agent 本地与设备侧协议混为一谈，且 FINISH 顺序错误（会导致真机丢尾）。证据：`src/host/server_for_client.cpp:1082,1125-1148`、`src/common/transfer.cpp:269-302,455-485`、`src/common/file.cpp:338-353,647-668`；实测见 `docs/verification/2026-09-11-real-device-connect.md` §6。
+
+1. **不发 `FILE_INIT`**：`"send …"` 命令串仅存在于 client→本地 host agent 的命令行，被 host 本地消化（`DispatchTaskData`），**永不上设备线**。设备线首帧是
+   - H→D `WAKEUP_SLAVETASK(12)`，**空载荷**（主端先建从端任务槽；daemon 无槽会丢弃后续 `FILE_CHECK`，见 `src/common/session.cpp:1631-1663,1726`）
 2. H→D `FILE_CHECK(3001)`，载荷=TransferConfig{fileSize, path=remote, optionalName=本地文件名, updateIfNew, holdTimestamp, clientCwd, 其余空/0}
 3. D→H `FILE_BEGIN(3002)`：**载荷可能为空（Rust）或 8 字节 FeatureFlags（C++，bit0=hugeBuf）**——两者都接受
-4. H→D `FILE_DATA(3003)` 循环：载荷 = **64 字节定长槽**（TransferPayload 序列化后左对齐填入 64B，余下补 0）+ 数据块（≤48KiB，`index`=块内绝对偏移）
-5. 完成后 H→D `FILE_FINISH(3004)` 载荷 `[1]`；D 回 `FILE_FINISH` 载荷 `[0]` 携带汇总文本（经 KERNEL_ECHO Ok 级）；随后通道关闭
+4. H→D `FILE_DATA(3003)` 循环：载荷 = **64 字节定长槽**（TransferPayload 序列化后左对齐填入 64B，余下补 0）+ 数据块（≤48KiB，`index`=文件内**绝对偏移**）
+   - **空文件**：仍需发**一个零长度 DATA 帧**（仅 64B 槽，compressSize=0）——主端读到 0 字节时的固有行为（`ProcressFileIORead` → `SendIOPayload(index, buf, 0)`），从端写 0 字节命中 `req->result == 0` 完成分支
+5. **收尾顺序（关键，写反会导致文件尾部间歇丢失）**：
+   - 主端发完数据后**不得自行发 `FILE_FINISH[1]`**：daemon 收到 `[1]` 会立即 `CloseCtxFd` 而不等挂起的 `uv_fs_write` 完成，丢弃尚未落盘的尾块（真机实测：500KB 偶发只落 491520B、98305B 偶发只落 98304B；`src/common/file.cpp:647-668`）
+   - 正确顺序：**从端（写端）在自身 IO 完成后**（`indexIO >= fileSize`，`closeNotify` 仅在写路径设置，见 `transfer.cpp:291-302`）主动 D→H `FILE_FINISH[1]` → 主端回 `FILE_FINISH[0]` → 从端 `TransferSummary + TaskFinish` → D→H `KERNEL_ECHO`(Ok 级，载荷 `[level][文本]`，**命令字 9**，非 ECHO_RAW 10) + `KERNEL_CHANNEL_CLOSE[1]`
+   - 实测：按此顺序连续 36 次不同尺寸发送 **0 失败**；抢先发 `[1]` 时失败率约 30%
 
 #### 4.7.2 接收单文件（device→host）
 
-镜像流程：H→D `FILE_INIT` 载荷 `"recv <remote> <local>"` → daemon 成为主端，D→H `FILE_CHECK`（TransferConfig，host 侧按 path/optionalName 落盘）→ H→D `FILE_BEGIN`（**host 作为 slave 发空载荷**）→ D→H `FILE_DATA` → `FILE_FINISH[1]`/`[0]` 同上。
+镜像流程：H→D `FILE_INIT` 载荷 `"<remote> <local>"`（**无 `recv` 首词**——首词是 host-agent 本地命令串；daemon 按末尾两参解析，`src/common/file.cpp:335-345`）→ daemon 成为**主端**，D→H `WAKEUP` + D→H `FILE_CHECK`（TransferConfig，host 侧按 path/optionalName 落盘）→ H→D `FILE_BEGIN`（**host 作为 slave 发空载荷**）→ D→H `FILE_DATA` → host 落盘完成（host 为写端）→ **H→D `FILE_FINISH[1]`** → daemon 回 `[0]` → 同样按上述顺序收尾。
+
+实测：0/1/49152/49153/98305/500000/1000000 字节共 14 次接收 **0 失败**。
 
 #### 4.7.3 目录
 
