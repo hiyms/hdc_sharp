@@ -260,4 +260,42 @@ public sealed class HdcDevice
         ArgumentException.ThrowIfNullOrEmpty(localDir);
         return FileOperation.ReceiveDirectoryAsync(this, remoteDir, localDir, progress, ct);
     }
+
+    /// <summary>
+    /// 安装应用到设备（WAKEUP_SLAVETASK + APP_CHECK/BEGIN/DATA + 设备端 APP_FINISH，spec §4.7.4）：
+    /// 本地为 <c>.hap/.hsp/.app</c> 文件时直接传输；为目录时先在本机打成 ustar tar（条目名为相对路径，
+    /// 不写结尾全零块，与上游打包器一致）再作为单个文件传输，设备端解包后交给 <c>bm install</c>。
+    /// 线上 optionalName 为 9 位随机名加原扩展名，避免非法应用名导致设备端 pm 无法安装。
+    /// 包缺失或目录为空在任何 APP 命令发出前抛出，不影响会话。
+    /// </summary>
+    /// <param name="packagePath">本地包文件或待安装目录。</param>
+    /// <param name="options">安装选项；null 使用默认（<see cref="InstallOptions.Replace"/> 为 true，即 <c>-r</c>）。</param>
+    /// <param name="ct">取消令牌；取消时发送 CHANNEL_CLOSE[0] 并清理通道。</param>
+    /// <returns>设备端 <c>bm install</c> 输出文本（APP_FINISH 载荷自偏移 2 起）。</returns>
+    /// <exception cref="ArgumentException">路径为空，或目录没有任何可打包条目。</exception>
+    /// <exception cref="FileNotFoundException">本地包文件不存在。</exception>
+    /// <exception cref="HdcException">安装失败（携带设备端 bm 输出与首个 [Exxxxxx] 错误码）、连接断开或协议字段非法。</exception>
+    public Task<string> InstallAsync(
+        string packagePath, InstallOptions? options = null, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(packagePath);
+        return AppOperation.InstallAsync(this, packagePath, options, ct);
+    }
+
+    /// <summary>
+    /// 按包名卸载设备端应用（单帧 APP_UNINSTALL，spec §4.7.4）：选项原样拼进载荷（<c>"&lt;opts&gt; &lt;package&gt;"</c>），
+    /// 设备端补 <c>-n</c> 后执行 <c>bm uninstall</c>。上游 host 对卸载不发 WAKEUP/APP_CHECK，也不传包数据。
+    /// </summary>
+    /// <param name="packageName">应用包名（bundle name）。</param>
+    /// <param name="options">卸载选项；null 表示无选项。</param>
+    /// <param name="ct">取消令牌；取消时发送 CHANNEL_CLOSE[0] 并清理通道。</param>
+    /// <returns>设备端 <c>bm uninstall</c> 输出文本（APP_FINISH 载荷自偏移 2 起）。</returns>
+    /// <exception cref="ArgumentException">包名为空。</exception>
+    /// <exception cref="HdcException">卸载失败（携带设备端 bm 输出与首个 [Exxxxxx] 错误码）或连接断开。</exception>
+    public Task<string> UninstallAsync(
+        string packageName, UninstallOptions? options = null, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(packageName);
+        return AppOperation.UninstallAsync(this, packageName, options, ct);
+    }
 }

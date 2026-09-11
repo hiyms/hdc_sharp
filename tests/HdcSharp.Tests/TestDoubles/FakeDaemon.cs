@@ -67,6 +67,24 @@ public sealed class FakeDaemonOptions
     /// <summary>recv 方向目录剧本：非 null 时按序逐文件推 FILE_CHECK/DATA（optionalName 即相对路径），
     /// 宿主每文件回 FILE_FINISH[1] 后推进下一文件，队列耗尽回 FILE_FINISH[0]（上游 file.cpp:645-668）。</summary>
     public IReadOnlyList<(string Name, byte[] Content)>? FilePushFiles { get; set; }
+
+    /// <summary>应用安装剧本：非 null 时按上游从端语义接收 APP_CHECK/APP_DATA，并把包按 optionalName 落到该目录。</summary>
+    public string? AppSinkDirectory { get; set; }
+
+    /// <summary>应用剧本收到 APP_CHECK 后是否回 APP_BEGIN；false 时立即回失败 APP_FINISH，模拟 Rust daemon 建临时文件失败（daemon_app.rs:385-392）。</summary>
+    public bool AppSendBegin { get; set; } = true;
+
+    /// <summary>APP_FINISH 载荷的 success 字节（1=成功，0=失败）。</summary>
+    public byte AppFinishSuccess { get; set; } = 1;
+
+    /// <summary>APP_FINISH 载荷自偏移 2 起的 bm 输出文本。</summary>
+    public string AppFinishMessage { get; set; } = "Success";
+
+    /// <summary>每个 APP_DATA 落盘前的延迟毫秒数，用于制造确定性的「传输中」窗口（模拟慢设备）。</summary>
+    public int AppDataDelayMs { get; set; }
+
+    /// <summary>卸载剧本：收到 APP_UNINSTALL 后回 APP_FINISH（mode=2）。</summary>
+    public bool AppUninstallEnabled { get; set; }
 }
 
 /// <summary>
@@ -97,6 +115,7 @@ public sealed class FakeDaemon : IDisposable
     {
         Sink,
         Push,
+        AppSink,
     }
 
     private sealed class FileTaskState
@@ -114,6 +133,9 @@ public sealed class FakeDaemon : IDisposable
 
         /// <summary>从端是否已因自身 IO 完成而发出过 FILE_FINISH[1]。</summary>
         public bool SlaveFinished { get; set; }
+
+        /// <summary>落盘状态的互斥锁：每个 DATA 帧都会调度一个 20ms 延迟落盘任务，它们会并发触达同一 state。</summary>
+        public object SyncRoot { get; } = new();
 
         /// <summary>已收到但尚未落盘的一块（模拟真机 daemon uv_fs_write 的异步滞后）。</summary>
         public (long Index, byte[] Data)? Pending { get; set; }
@@ -385,6 +407,11 @@ public sealed class FakeDaemon : IDisposable
     private async Task HandleTaskFrameAsync(
         NetworkStream stream, Frame frame, Dictionary<uint, FileTaskState> fileStates, CancellationToken ct)
     {
+        if (await TryHandleAppFrameAsync(stream, frame, fileStates, ct))
+        {
+            return;
+        }
+
         if (await TryHandleFileFrameAsync(stream, frame, fileStates, ct))
         {
             return;
@@ -414,6 +441,93 @@ public sealed class FakeDaemon : IDisposable
             default:
                 break;
         }
+    }
+
+    /// <summary>
+    /// 应用安装/卸载剧本（对齐上游从端语义）：APP_CHECK 建临时文件并回 APP_BEGIN（APP 流程无 FINISH 握手），
+    /// APP_DATA 按槽内 index 落盘并在收到声明字节数后回 APP_FINISH；APP_UNINSTALL 直接回 APP_FINISH(mode=2)。
+    /// </summary>
+    private async Task<bool> TryHandleAppFrameAsync(
+        NetworkStream stream, Frame frame, Dictionary<uint, FileTaskState> fileStates, CancellationToken ct)
+    {
+        switch (frame.Command)
+        {
+            case HdcCommand.AppCheck when _options.AppSinkDirectory is { } sinkDirectory:
+                await HandleAppCheckAsync(stream, frame, fileStates, sinkDirectory, ct).ConfigureAwait(false);
+                return true;
+            case HdcCommand.AppData when fileStates.TryGetValue(frame.ChannelId, out FileTaskState? state) &&
+                                          state.Kind == FileTaskKind.AppSink:
+                await HandleAppDataAsync(stream, frame, state, ct).ConfigureAwait(false);
+                return true;
+            case HdcCommand.AppUninstall when _options.AppUninstallEnabled:
+                await SendAppFinishAsync(stream, frame.ChannelId, AppModeUninstall, ct).ConfigureAwait(false);
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private async Task HandleAppCheckAsync(
+        NetworkStream stream, Frame frame, Dictionary<uint, FileTaskState> fileStates, string sinkDirectory, CancellationToken ct)
+    {
+        TransferConfig config = TransferConfig.Parse(frame.Payload);
+        Directory.CreateDirectory(sinkDirectory);
+        string target = Path.Combine(sinkDirectory, NormalizeSeparators(config.OptionalName));
+        fileStates[frame.ChannelId] = new FileTaskState
+        {
+            Kind = FileTaskKind.AppSink,
+            Sink = new FileStream(target, System.IO.FileMode.Create, FileAccess.Write, FileShare.Read),
+            FileSize = (long)config.FileSize,
+        };
+        if (_options.AppSendBegin)
+        {
+            await SendFrameAsync(stream, frame.ChannelId, HdcCommand.AppBegin, [], ct).ConfigureAwait(false);
+            return;
+        }
+
+        await SendAppFinishAsync(stream, frame.ChannelId, AppModeInstall, ct).ConfigureAwait(false);
+    }
+
+    private async Task HandleAppDataAsync(
+        NetworkStream stream, Frame frame, FileTaskState state, CancellationToken ct)
+    {
+        if (frame.Payload.Length < HdcConstants.TransferSlotSize || state.Sink is null)
+        {
+            return;
+        }
+
+        TransferPayload head = TransferPayload.ParseSlot(frame.Payload.AsSpan(0, HdcConstants.TransferSlotSize));
+        int size = (int)head.CompressSize;
+        if (size < 0 || frame.Payload.Length - HdcConstants.TransferSlotSize < size)
+        {
+            return;
+        }
+
+        if (_options.AppDataDelayMs > 0)
+        {
+            await Task.Delay(_options.AppDataDelayMs, ct).ConfigureAwait(false);
+        }
+
+        state.Sink.Seek((long)head.Index, SeekOrigin.Begin);
+        state.Sink.Write(frame.Payload, HdcConstants.TransferSlotSize, size);
+        state.Sink.Flush();
+        state.Received += size;
+        if (state.Received >= state.FileSize)
+        {
+            // 真机 daemon 在传输完成后立即关闭临时文件再跑 bm（daemon_app.cpp:143-148），此处同样落盘并释放句柄
+            CloseSink(state);
+            await SendAppFinishAsync(stream, frame.ChannelId, AppModeInstall, ct).ConfigureAwait(false);
+        }
+    }
+
+    private async Task SendAppFinishAsync(NetworkStream stream, uint channelId, byte mode, CancellationToken ct)
+    {
+        byte[] text = Encoding.UTF8.GetBytes(_options.AppFinishMessage);
+        byte[] payload = new byte[text.Length + 2];
+        payload[0] = mode;
+        payload[1] = _options.AppFinishSuccess;
+        text.CopyTo(payload, 2);
+        await SendFrameAsync(stream, channelId, HdcCommand.AppFinish, payload, ct).ConfigureAwait(false);
     }
 
     private async Task<bool> TryHandleFileFrameAsync(
@@ -489,9 +603,17 @@ public sealed class FakeDaemon : IDisposable
         if (fileStates.TryGetValue(frame.ChannelId, out FileTaskState? previous))
         {
             // 目录模式同一通道的下一个 CHECK：真机 daemon 在前一文件收尾时 CloseCtxFd；此处关闭上一文件流
-            CloseSink(previous);
-            totalReceived = previous.TotalReceived;
-            filesReceived = previous.FilesReceived;
+            long previousTotal;
+            int previousFiles;
+            lock (previous.SyncRoot)
+            {
+                CloseSink(previous);
+                previousTotal = previous.TotalReceived;
+                previousFiles = previous.FilesReceived;
+            }
+
+            totalReceived = previousTotal;
+            filesReceived = previousFiles;
         }
 
         string relative = ResolveSinkRelativePath(config);
@@ -560,36 +682,52 @@ public sealed class FakeDaemon : IDisposable
 
         // 真机 daemon 的 uv_fs_write 是异步的：写完成回调晚于后续帧到达。此处把每块延后一小段
         // 时间落盘，从而确定性地重现「主端抢先发 FILE_FINISH[1] → daemon 立即关 fd → 挂起写丢失」的丢尾
-        FlushPending(state);
-        state.Pending = ((long)head.Index, frame.Payload[HdcConstants.TransferSlotSize..(HdcConstants.TransferSlotSize + size)]);
-        state.Received += size;
-        state.TotalReceived += size;
+        lock (state.SyncRoot)
+        {
+            FlushPending(state);
+            state.Pending = ((long)head.Index, frame.Payload[HdcConstants.TransferSlotSize..(HdcConstants.TransferSlotSize + size)]);
+            state.Received += size;
+            state.TotalReceived += size;
+        }
+
         state.PendingFlush = CompletePendingAfterDelayAsync(stream, frame.ChannelId, state);
     }
 
     private async Task CompletePendingAfterDelayAsync(NetworkStream stream, uint channelId, FileTaskState state)
     {
         await Task.Delay(20, _cts.Token).ConfigureAwait(false);
-        FlushPending(state);
-        if (!state.SlaveFinished && state.Written >= state.FileSize)
+        bool completed;
+        lock (state.SyncRoot)
         {
-            state.SlaveFinished = true;
+            FlushPending(state);
+            completed = !state.SlaveFinished && state.Written >= state.FileSize;
+            if (completed)
+            {
+                state.SlaveFinished = true;
+            }
+        }
+
+        if (completed)
+        {
             await SendFrameAsync(stream, channelId, HdcCommand.FileFinish, [1], _cts.Token).ConfigureAwait(false);
         }
     }
 
     private static void FlushPending(FileTaskState state)
     {
-        if (state.Pending is not { } pending || state.Sink is null)
+        lock (state.SyncRoot)
         {
-            state.Pending = null;
-            return;
-        }
+            if (state.Pending is not { } pending || state.Sink is null)
+            {
+                state.Pending = null;
+                return;
+            }
 
-        state.Sink.Seek(pending.Index, SeekOrigin.Begin);
-        state.Sink.Write(pending.Data);
-        state.Written += pending.Data.Length;
-        state.Pending = null;
+            state.Sink.Seek(pending.Index, SeekOrigin.Begin);
+            state.Sink.Write(pending.Data);
+            state.Written += pending.Data.Length;
+            state.Pending = null;
+        }
     }
 
     private async Task<bool> HandleSinkFinishAsync(NetworkStream stream, Frame frame, FileTaskState state, CancellationToken ct)
@@ -604,19 +742,31 @@ public sealed class FakeDaemon : IDisposable
             // 模拟真机 daemon 收到主端 FILE_FINISH[1] 的行为：立即 CloseCtxFd 不等挂起写完成，
             // 回 [0] 且不走 TaskFinish（src/common/file.cpp:647-668）。主端不应抢先发 [1]——
             // 抢先发会丢弃尚未落盘的尾块，正是该剧本要抓的回归
-            state.PendingFlush = null;
-            state.Pending = null;
-            CloseSink(state);
+            lock (state.SyncRoot)
+            {
+                state.PendingFlush = null;
+                state.Pending = null;
+                CloseSink(state);
+            }
+
             await SendFrameAsync(stream, frame.ChannelId, HdcCommand.FileFinish, [0], ct);
             return true;
         }
 
         // 主端回 [0] → 从端 TransferSummary + TaskFinish（ECHO + CHANNEL_CLOSE）
-        state.PendingFlush = null;
-        FlushPending(state);
-        CloseSink(state);
+        long totalReceived;
+        int filesReceived;
+        lock (state.SyncRoot)
+        {
+            state.PendingFlush = null;
+            FlushPending(state);
+            CloseSink(state);
+            totalReceived = state.TotalReceived;
+            filesReceived = state.FilesReceived;
+        }
+
         byte[] text = Encoding.UTF8.GetBytes(
-            $"FileTransfer finish, Size:{state.TotalReceived}, File count = {state.FilesReceived}, time:0ms rate:0.00kB/s");
+            $"FileTransfer finish, Size:{totalReceived}, File count = {filesReceived}, time:0ms rate:0.00kB/s");
         byte[] echo = new byte[text.Length + 1];
         echo[0] = (byte)MessageLevel.Ok;
         text.CopyTo(echo, 1);
@@ -802,6 +952,37 @@ public sealed class FakeDaemon : IDisposable
     public static FakeDaemon WithFilePushDirectory(params (string Name, byte[] Content)[] files)
     {
         return new FakeDaemon(new FakeDaemonOptions { FilePushFiles = files });
+    }
+
+    private static readonly byte AppModeInstall = 1;
+
+    private static readonly byte AppModeUninstall = 2;
+
+    /// <summary>创建“收到 APP_CHECK/DATA 后把包落盘并回 APP_FINISH”的假 daemon（Rust 世代、免认证）。</summary>
+    /// <param name="sinkDirectory">包落盘目录（文件名取 optionalName）；null 时不接管 APP 命令。</param>
+    /// <param name="output">APP_FINISH 载荷自偏移 2 起的 bm 输出文本。</param>
+    /// <param name="success">APP_FINISH 的 success 字节；false 时以输出文本报错。</param>
+    public static FakeDaemon WithInstallScript(string? sinkDirectory = null, string output = "Success", bool success = true)
+    {
+        return new FakeDaemon(new FakeDaemonOptions
+        {
+            AppSinkDirectory = sinkDirectory,
+            AppFinishMessage = output,
+            AppFinishSuccess = success ? (byte)1 : (byte)0,
+        });
+    }
+
+    /// <summary>创建“收到 APP_UNINSTALL 后回 APP_FINISH(mode=2)”的假 daemon（Rust 世代、免认证）。</summary>
+    /// <param name="output">APP_FINISH 载荷自偏移 2 起的 bm 输出文本。</param>
+    /// <param name="success">APP_FINISH 的 success 字节；false 时以输出文本报错。</param>
+    public static FakeDaemon WithUninstallScript(string output = "Success", bool success = true)
+    {
+        return new FakeDaemon(new FakeDaemonOptions
+        {
+            AppUninstallEnabled = true,
+            AppFinishMessage = output,
+            AppFinishSuccess = success ? (byte)1 : (byte)0,
+        });
     }
 
     private Task SendAuthOkAsync(NetworkStream stream, uint sessionId, CancellationToken ct)
