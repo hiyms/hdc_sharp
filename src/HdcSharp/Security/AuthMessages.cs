@@ -143,6 +143,14 @@ internal static class AuthMessages
                 return ParseAuthOk(msg, caps, out errorText);
             case DaemonAuthTypePublicKey:
                 caps.Scheme = ResolveAuthScheme(msg.Buf);
+                // authtype TLV 是定论性的 C++ 世代信号：仅 C++ daemon 会附（HandDaemonAuthInit），
+                // 且仅当 host 声明支持 RSA_3072_SHA512——host 恒声明。version 字段不可依赖：
+                // C++ daemon 就地改写收到的手握消息后重发，version 恒为 host 自己的串
+                if (caps.Scheme == AuthScheme.PssSha512)
+                {
+                    caps.Generation = DaemonGeneration.Cpp;
+                }
+
                 return AuthPhase.AuthRequired;
             case DaemonAuthTypeSignature:
                 token = Encoding.UTF8.GetBytes(msg.Buf);
@@ -176,7 +184,7 @@ internal static class AuthMessages
     private static AuthPhase ParseAuthOk(SessionHandShake msg, DaemonCapabilities caps, out string errorText)
     {
         Dictionary<string, string> map = Tlv16.Parse(msg.Buf);
-        caps.Generation = ClassifyGeneration(msg.Version);
+        caps.Generation = ResolveGenerationFromAuthOk(msg.Version, map);
         caps.DeviceName = map.GetValueOrDefault(HdcConstants.TlvDevName, "");
         caps.Authenticated = map.GetValueOrDefault(HdcConstants.TlvDaemonAuthStatus) == HdcConstants.AuthStatusSuccess;
         string emgMsg = map.GetValueOrDefault(HdcConstants.TlvEmgMsg, "");
@@ -190,6 +198,19 @@ internal static class AuthMessages
 
         errorText = caps.ErrorMessage ?? "";
         return AuthPhase.AuthFailed;
+    }
+
+    private static DaemonGeneration ResolveGenerationFromAuthOk(string version, Dictionary<string, string> map)
+    {
+        // C++ 世代 daemon 在 AUTH_OK 里附 1200="enable" 与 supportfeatures（AddFeatureTagToEmgmsg）；
+        // Rust 世代仅 devname/daemonauthstatus/emgmsg（make_ok_message）。该信号在设备启用
+        // 纯 daemon 侧连接校验时会缺席，故仍以 version 前缀兜底
+        if (map.ContainsKey(HdcConstants.TlvShellOpt) || map.ContainsKey(HdcConstants.TlvSupportFeatures))
+        {
+            return DaemonGeneration.Cpp;
+        }
+
+        return ClassifyGeneration(version);
     }
 
     private static DaemonGeneration ClassifyGeneration(string version)

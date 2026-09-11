@@ -213,10 +213,15 @@ tests\HdcSharp.Tests\（Protocol 黄金向量 · FakeDaemon · Operations 回环
 | 信号 | Rust 世代 | C++ 世代 |
 |---|---|---|
 | version 串 | `Ver: 3.0.0*` | `Ver: 3.2.0*` |
-| AUTH_OK buf TLV | 仅 devname/daemonauthstatus/emgmsg | 另含 `1200`/`supportfeatures` |
+| AUTH_PUBLICKEY 回复 buf | 裸 token（64 字符 hex） | TLV{`authtype`="1"}（当 host 声明支持 RSA_3072_SHA512 时，host 恒声明） |
+| AUTH_OK buf TLV | 仅 devname/daemonauthstatus/emgmsg | 另含 `1200`/`supportfeatures`（设备未启用纯 daemon 侧连接校验时才附加） |
 | 握手时 supportfeatures 回显 | 无 | 有（含 heartbeat/encrypt_tcp 与否） |
 
 指纹在 AUTH_OK 时确定，此后决定：心跳开关、可否使用 1200、文件传输 FeatureFlags 容忍度。
+
+> **version 字段的回显语义（实测 + 源码验证，见 `docs/verification/2026-09-11-real-device-connect.md`）**：C++ daemon 的握手回复（`AUTH_PUBLICKEY`/`AUTH_OK`）均为**就地修改收到的 `SessionHandShake` 后重发**（`src/daemon/daemon.cpp:544-566, 924-949, 1455-1490`），只改 `authType`/`buf` 并显式清零 `sessionId`、清空 `connectKey`，**从不设置 `version`** → 回复中的 version 恒为 **host 自己发出的串**。Rust daemon 相反，显式 `version: get_version()`（自身版本）。
+>
+> 因 host 恒声明 `Ver: 3.2.0f`（`HdcConstants.HostVersion`），前缀判定在两种世代下均正确：C++ 回显得 `Ver: 3.2.*` → Cpp；Rust 自报 `Ver: 3.0.0e`（`HDC_VERSION_NUMBER=0x30000400`）→ Rust。C++ 自身版本常量 `0x30200500` 亦为 `Ver: 3.2.0f`（`src/common/define.h:130`），与 host 声明一致。局限：若 host 改声明 `3.0.x`，与 C++ daemon 通信将被误判为 Rust——故**实现以 `authtype` TLV（定论性 C++ 信号）+ version 前缀组合判定**。
 
 **心跳**：仅当双方声明 `heartbeat`（C++ 世代）才启用：`HdcConnection` 每 5s 发 `CMD_HEARTBEAT_MSG(5000)` 载荷=HeartbeatMsg（count 递增）；接收端仅刷新时间戳。daemon 侧 1 小时无任何入帧才断连，host 不主动超时。Rust 世代 daemon 收到 5000 会解析失败——**指纹为 Rust 时连支持特性声明都省略，从根源避免**。
 

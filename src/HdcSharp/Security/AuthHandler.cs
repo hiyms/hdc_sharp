@@ -91,6 +91,7 @@ internal static class AuthHandler
             await conn.SendAsync(0, HdcCommand.KernelHandshake, hello.Serialize(), authCts.Token).ConfigureAwait(false);
 
             AuthScheme scheme = AuthScheme.Unknown;
+            bool cppGenerationConfirmed = false;
             while (true)
             {
                 Frame frame = await inbox.Reader.ReadAsync(authCts.Token).ConfigureAwait(false);
@@ -109,6 +110,12 @@ internal static class AuthHandler
                 if (phase == AuthPhase.AuthOk)
                 {
                     caps.Scheme = scheme;
+                    // AUTH_PUBLICKEY 阶段的 authtype TLV 是定论性 C++ 信号，优先于 AUTH_OK 阶段的推断
+                    if (cppGenerationConfirmed)
+                    {
+                        caps.Generation = DaemonGeneration.Cpp;
+                    }
+
                     await AwaitHandshakeCloseAsync(closeSignal.Task, ct).ConfigureAwait(false);
                     if (terminated)
                     {
@@ -123,6 +130,7 @@ internal static class AuthHandler
                 if (message.AuthType == AuthTypePublicKey)
                 {
                     scheme = caps.Scheme;
+                    cppGenerationConfirmed = caps.Generation == DaemonGeneration.Cpp;
                     InvokeAuthorizationRequested(onAuthorizationRequested);
                     hello.AuthType = AuthTypePublicKey;
                     hello.Buf = Encoding.UTF8.GetString(AuthMessages.BuildPublicKeyResponse(Environment.MachineName, keys.GetPublicKeyPem()));

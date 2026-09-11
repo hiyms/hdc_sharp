@@ -86,6 +86,42 @@ public class AuthMessagesTests
     }
 
     [Fact]
+    public void ParseAuthOk_CppGeneration_NotDoubtedByEchoedHostVersion()
+    {
+        // 真机实测：C++ daemon 就地改写收到的手握消息后重发，version 恒为 host 自己的串。
+        // 若 host 声明 3.0.x，仅靠 version 前缀会误判为 Rust；1200/supportfeatures TLV 优先
+        var buf = HdcSharp.Protocol.Tlv16.Serialize(new[]
+        {
+            ("devname", "cpp-dev"), ("daemonauthstatus", "SUCCESS"), ("emgmsg", ""), ("1200", "enable")
+        });
+        var msg = new HdcSharp.Protocol.Messages.SessionHandShake { Banner = "OHOS HDC", AuthType = 4, Buf = buf, Version = "Ver: 3.0.0e" };
+        var phase = AuthMessages.ParseDaemonHandshake(msg, out var caps, out _, out _);
+        Assert.Equal(AuthPhase.AuthOk, phase);
+        Assert.Equal(DaemonGeneration.Cpp, caps.Generation);
+    }
+
+    [Fact]
+    public void ParsePublicKeyRequest_AuthTypeTlv_MarksCppGeneration()
+    {
+        // authtype TLV 仅 C++ daemon 会附（HandDaemonAuthInit），与 PSS 方案合并作为定论性世代信号
+        var cpp = new HdcSharp.Protocol.Messages.SessionHandShake
+        {
+            Banner = "OHOS HDC", AuthType = 3,
+            Buf = HdcSharp.Protocol.Tlv16.Serialize(new[] { ("authtype", "1") }),
+            Version = "Ver: 3.0.0e",
+        };
+        AuthMessages.ParseDaemonHandshake(cpp, out var cppCaps, out _, out _);
+        Assert.Equal(DaemonGeneration.Cpp, cppCaps.Generation);
+
+        var rust = new HdcSharp.Protocol.Messages.SessionHandShake
+        {
+            Banner = "OHOS HDC", AuthType = 3, Buf = "ABC", Version = "Ver: 3.0.0e",
+        };
+        AuthMessages.ParseDaemonHandshake(rust, out var rustCaps, out _, out _);
+        Assert.Equal(DaemonGeneration.Unknown, rustCaps.Generation);
+    }
+
+    [Fact]
     public void ParseSignatureChallenge_CppToken20Chars()
     {
         var msg = new HdcSharp.Protocol.Messages.SessionHandShake { Banner = "OHOS HDC", AuthType = 2, Buf = "0123456789abcdefghij" };

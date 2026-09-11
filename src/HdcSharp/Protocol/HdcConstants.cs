@@ -47,6 +47,9 @@ public static class HdcConstants
     /// <summary>Tlv16 支持特性 tag。</summary>
     public const string TlvSupportFeatures = "supportfeatures";
 
+    /// <summary>Tlv16 shell 扩展选项 tag（数值即命令号 1200，仅 C++ 世代 daemon 会附加，故兼作世代指纹）。</summary>
+    public const string TlvShellOpt = "1200";
+
     /// <summary>Tlv16 设备名 tag。</summary>
     public const string TlvDevName = "devname";
 
