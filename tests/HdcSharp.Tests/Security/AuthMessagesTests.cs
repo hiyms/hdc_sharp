@@ -73,6 +73,19 @@ public class AuthMessagesTests
     }
 
     [Fact]
+    public void ParsePublicKeyRequest_RustRawTokenBuf_FallsBackToPkcs1()
+    {
+        // Rust 世代 daemon 的 AUTH_PUBLICKEY 把 64 字符大写 hex token 直接放在 buf（非 TLV）；
+        // 官方 host 对 TLV 解析失败回退旧式 RSA 加密
+        string token = string.Concat(Enumerable.Repeat("3F2A9C7E1B4D8056", 4));
+        var msg = new HdcSharp.Protocol.Messages.SessionHandShake { Banner = "OHOS HDC", AuthType = 3, Buf = token };
+        var phase = AuthMessages.ParseDaemonHandshake(msg, out var caps, out _, out _);
+        Assert.Equal(64, token.Length);
+        Assert.Equal(AuthPhase.AuthRequired, phase);
+        Assert.Equal(AuthScheme.Pkcs1, caps.Scheme);
+    }
+
+    [Fact]
     public void ParseSignatureChallenge_CppToken20Chars()
     {
         var msg = new HdcSharp.Protocol.Messages.SessionHandShake { Banner = "OHOS HDC", AuthType = 2, Buf = "0123456789abcdefghij" };

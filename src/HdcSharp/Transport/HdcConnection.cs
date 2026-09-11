@@ -62,6 +62,12 @@ public sealed class HdcConnection : IAsyncDisposable
     public event Action<Frame>? ChannelClosed;
 
     /// <summary>
+    /// 连接终结（对端断开、协议错误、取消或释放）时触发一次，在读循环线程同步调用。
+    /// 供内部上层在等待中快速感知断开；处理器必须立即返回且不得回调本连接。
+    /// </summary>
+    internal event Action? Terminated;
+
+    /// <summary>
     /// 发送一帧：入口检查连接状态，信号量串行化后整帧写出并刷新。
     /// </summary>
     /// <param name="channelId">通道号。</param>
@@ -398,6 +404,26 @@ public sealed class HdcConnection : IAsyncDisposable
         // 先关 TCP 再取消心跳：让在途读写与心跳尽快退出
         _client.Close();
         _heartbeatCts.Cancel();
+        RaiseTerminated();
+    }
+
+    private void RaiseTerminated()
+    {
+        Action? handler = Terminated;
+        if (handler is null)
+        {
+            return;
+        }
+
+        try
+        {
+            handler();
+        }
+        catch (Exception ex)
+        {
+            // 事件回调异常必须与连接隔离，否则会炸掉读循环
+            Log(HdcLogLevel.Error, $"Terminated 事件处理器异常：{ex.Message}");
+        }
     }
 
     private void Log(HdcLogLevel level, string message)

@@ -142,10 +142,7 @@ internal static class AuthMessages
             case DaemonAuthTypeOk:
                 return ParseAuthOk(msg, caps, out errorText);
             case DaemonAuthTypePublicKey:
-                Dictionary<string, string> keyRequest = Tlv16.Parse(msg.Buf);
-                caps.Scheme = keyRequest.TryGetValue(HdcConstants.TlvAuthType, out string? authType) && authType == PssAuthTypeValue
-                    ? AuthScheme.PssSha512
-                    : AuthScheme.Pkcs1;
+                caps.Scheme = ResolveAuthScheme(msg.Buf);
                 return AuthPhase.AuthRequired;
             case DaemonAuthTypeSignature:
                 token = Encoding.UTF8.GetBytes(msg.Buf);
@@ -155,6 +152,24 @@ internal static class AuthMessages
             default:
                 errorText = $"未知的认证消息类型 {msg.AuthType}";
                 return AuthPhase.AuthFailed;
+        }
+    }
+
+    private static AuthScheme ResolveAuthScheme(string buf)
+    {
+        // Rust 世代 daemon 会把原始 64 字符大写 hex token 直接放在 AUTH_PUBLICKEY 的 buf（非 TLV，
+        // hdc_rust daemon_lib/auth.rs 的 handshake_init）；官方 host 对 TLV 解析失败一律回退旧式
+        // RSA_ENCRYPT（server.cpp GetDaemonAuthType），此处对齐
+        try
+        {
+            Dictionary<string, string> keyRequest = Tlv16.Parse(buf);
+            return keyRequest.TryGetValue(HdcConstants.TlvAuthType, out string? authType) && authType == PssAuthTypeValue
+                ? AuthScheme.PssSha512
+                : AuthScheme.Pkcs1;
+        }
+        catch (Exception ex) when (ex is FormatException or ArgumentOutOfRangeException or HdcException)
+        {
+            return AuthScheme.Pkcs1;
         }
     }
 
