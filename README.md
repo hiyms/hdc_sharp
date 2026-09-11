@@ -26,7 +26,7 @@
 | shell：一次性 `ExecuteShellAsync`、流式 `StreamShellOutputAsync`、交互式 `OpenInteractiveShellAsync`（Ctrl-C/Ctrl-D） | 可用 | ✅ 真机（含 TLV32 `-b` 沙箱） |
 | 文件：单文件 `SendFileAsync` / `ReceiveFileAsync`（进度回调、48KiB 分块） | 可用 | ✅ 真机（多尺寸双向 sha256，含 0/1/49152/49153/98304/98305/147457/500000 边界） |
 | 目录：`SendDirectoryAsync` / `ReceiveDirectoryAsync`（递归、ustar 打包、跳过符号链接） | 可用 | ✅ 真机（3 层嵌套、往返闭环） |
-| 应用：`InstallAsync`（含 tar 打包）/ `UninstallAsync`（bm 输出与 `[Exxxxxx]` 错误码提取） | 可用 | ⚠️ 仅"文件安装路径 + 卸载错误路径"；**真实 hap 安装成功路径未验证** |
+| 应用：`InstallAsync`（含 tar 打包）/ `UninstallAsync`（bm 输出与 `[Exxxxxx]` 错误码提取） | 可用 | ✅ 真实 2.8MB 签名 hap 卸载→安装→复装→卸载闭环真机通过（以 `bm dump` 行数客观交叉验证）；⚠️ 目录（tar）安装需真实包方能覆盖 |
 | 端口转发：`ForwardTcpAsync`（fport）/ `ReverseTcpAsync`（rport）、`IForwardSession` 生命周期 | 可用 | ✅ 真机（隧道承载完整 HDC 会话 / 双向 FTP 交互） |
 | unity：`StreamHilogAsync`（行流）、`StreamBugReportAsync`（分块）、`RebootAsync`、`RemountAsync`、`SetRunModeAsync`、`RootRunAsync` | 可用 | ⚠️ 仅 hilog/bugreport 只读真机验证；reboot/remount/runmode/rootrun **仅有单测** |
 | TLS-PSK 加密通道（`ConnectOptions.EnableEncryption`） | **二期实验特性，未实现** | ❌ 置 true 时本连接按明文处理并记录警告 |
@@ -167,7 +167,8 @@ pwsh -File scripts/check-readme-snippets.ps1
 ## 已知限制与未覆盖项
 
 - **退出码不上线**：两世代 daemon 均不下发 shell 退出码，`ExecuteShellAsync` 只返回聚合输出；需要时在命令里追加 `echo $?`
-- **真实 hap 安装成功路径未验证**：真机仅打通"文件安装路径（bm 返回 `no signature file`）"与卸载错误提取；需要真实签名 hap 才能覆盖成功分支
+- ~~真实 hap 安装成功路径未验证~~ → **已验证**（2026-09-11，用户提供 `entry-default-signed.hap` 2.8MB）：卸载→安装→`-r` 复装→卸载全链路真机通过，设备状态由 `bm dump -n <bundle> | wc -l` 客观确认；过程另修正一处误报（bm 打印 successfully 但 APP_FINISH 的 success 字节为 0 时被判为失败，现已改为上游一致的文本判定，见验证记录 §11）
+- **目录（tar）安装未用真实包验证**：协议帧路径已通（设备端 bm 报 `install file path invalid`），但 bm 对 tar 的接受条件未定，需真实可分发的目录型包才能覆盖
 - **reboot / remount / runmode / rootrun 仅有单测**：会改变设备状态，未在真机上执行
 - **Rust 世代未在真机验证**：`Ver: 3.0.0e` 路径按上游源码实现，缺失心跳、`RunMode.Tcp`/`TcpClose` 不支持
 - **TLS-PSK 未实现**（二期实验特性）：`EnableEncryption=true` 当前按明文连接处理并记录警告

@@ -2,10 +2,11 @@
 #   1) 硬门禁：块注释 /* */、TODO/FIXME/HACK/XXX、疑似注释掉的代码 → 直接失败
 #   2) 人工确认清单：全部非 /// 行注释（按"平台注释只解释为什么"的标准逐条确认）
 #   3) 预算门禁：非 /// 注释行数不得超过 -MaxComments（新增注释须有意确认并显式抬升预算）
+#      预算沿革：84 → 85（2026-09-11 应用安装成功判定 inline 依据，见验证记录 §11）
 # 用法：pwsh -File scripts/check-comments.ps1 [-MaxComments 84]
 [CmdletBinding()]
 param(
-    [int]$MaxComments = 84
+    [int]$MaxComments = 85
 )
 
 $ErrorActionPreference = 'Stop'

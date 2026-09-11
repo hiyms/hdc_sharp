@@ -452,9 +452,7 @@ internal static class AppOperation
         }
 
         string message = Encoding.UTF8.GetString(payload.AsSpan(2));
-        // 判定规则（宽松于字节、严于纯文本）：文本出现 error/fail 一律失败；
-        // 否则须有正面成功证据（success 字节非 0 或文本含 success 字样），
-        // 以免把 "install bundle successfully." 这类仅字节为 0 的真机成功误报为失败
+        // error/fail 字样一律失败；否则须有正面成功证据（真机成功时字节也可能为 0）
         bool failed = LooksLikeFailure(message)
             || (payload[1] == 0 && !message.Contains("success", StringComparison.OrdinalIgnoreCase));
         return failed ? throw new HdcException(message, TryExtractErrorCode(message)) : message;
