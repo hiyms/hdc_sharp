@@ -225,3 +225,25 @@ cd D:/work/hdc_sharp && dotnet test tests/HdcSharp.Tests
 - `FILE_FINISH` 多文件语义：每个文件由**写端→主端**发一个 `[1]`；主端收 `[1]` 时若有下一文件则推进（**不发 `[0]`**），仅最后一个文件把 `1` 递减为 `[0]` 回发一次
 - `FILE_MODE(3006)`/`DIR_MODE(3007)` 仅在 `-m` 模式同步时使用（一期不实现）；`functionName` 在文件/目录传输中恒为空串（仅应用安装为 `"install"`）
 - 空目录不产生任何条目，上游 CLI 对空源目录直接报错；本库选择直返成功（不发明帧）
+
+---
+
+## 8. 真机应用安装/卸载路径验证（Task 16，同日追加）
+
+探针：`D:\work\hdc-probe\app-probe.cs`（无真实 .hap 包，故验证协议路径与错误提取，并以 bm 的真实响应反证帧路径已打通）
+
+| # | 场景 | 真机响应 | 结论 |
+|---|---|---|---|
+| 1 | 卸载不存在的包 `com.hdcsharp.nonexistent.pkg` | `HdcException: error: failed to uninstall bundle. code:9568386 error: uninstall missing installed bundle.` | ✅ `APP_UNINSTALL` 帧到达 bm，bm 真实错误被正确提取 |
+| 2 | 安装不存在的本地文件 | `FileNotFoundException: 待安装包不存在：…`（未发任何帧） | ✅ 客户端前置校验 |
+| 3 | 安装 1KB 垃圾内容 `.hap` | `HdcException: error: failed to install bundle. code:9568320 error: no signature file.` | ✅ **完整 APP 路径打通**：WAKEUP→APP_CHECK→APP_BEGIN→APP_DATA→APP_FINISH 全部被 daemon 接受，文件已传递并在设备侧调用 bm 安装 |
+| 4 | 安装目录（tar 打包） | `HdcException: error: failed to install bundle. code:9568269 error: install file path invalid.` | ⚠ 协议帧路径通（同上），但 tar 内容非真实 hap 结构，bm 拒绝；**需真实应用包才能进一步验证** |
+
+### 顺带核实的上游事实
+
+- 安装选项经 **`TransferConfig.options`** 传递（`src/host/host_app.cpp:99`，dash 前缀参数以空格连接），**不发 `APP_INIT` ASCII 参数串**；`functionName = "install"`
+- 目录安装：`Dir2Tar` 打到临时文件 `<随机名>.tar` 后作为**单个普通文件**走 APP 流（`host_app.cpp:32-54,143-154`）；本库命名与之一致（`AppOperation` 用 `NewRandomName() + ".tar"`）
+- 只有 `.hap/.hsp/.app` 后缀被当作包文件，其余路径一律尝试打包为 tar（`host_app.cpp:86-95`）
+- `APP_FINISH` 载荷 `[mode][success][bm 文本]`；`success=0` 时以文本与首个 `[Exxxxxx]` 作 `HdcException` 抛出
+
+**诚实标注**：真实应用包的安装成功路径与目录安装（真实 hap 目录）在本机缺少可用包的前提下**未验证**，已在计划 Task 19 的真机集成测试中标注为需真实包方可覆盖。
