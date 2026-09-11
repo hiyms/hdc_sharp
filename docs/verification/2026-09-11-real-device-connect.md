@@ -107,3 +107,47 @@ cd D:/work/hdc-probe && dotnet host-connect-probe.cs 192.168.2.161:44221
 # 3) 单元/集成测试（FakeDaemon 回环，不需要真机）
 cd D:/work/hdc_sharp && dotnet test tests/HdcSharp.Tests
 ```
+
+---
+
+## 5. 真机 Shell 验证（Task 14，同日追加）
+
+探针脚本：`D:\work\hdc-probe\shell-probe.cs`、`D:\work\hdc-probe\interactive-probe.cs`
+
+### 一次性执行（`ExecuteShellAsync`，走 1001）
+
+| 命令 | 结果 | 耗时 |
+|---|---|---|
+| `echo hello-hdcsharp` | `hello-hdcsharp` | 151ms |
+| `uname -a` | `HarmonyOS localhost HongMeng Kernel 1.12.0 #1 SMP Mon Jul  6 13:40:02 UTC 2026 aarch64 Toybox` | 119ms |
+| `echo 你好，HDC` | `你好，HDC`（多字节 UTF-8 跨块聚合正确） | 104ms |
+| `ls /nonexistent-path-xyz` | `ls: /nonexistent-path-xyz: No such file or directory`（stderr 合并入输出） | 149ms |
+| `sh -c 'exit 42'` | 空输出（**退出码不上线**，与 spec §4.11 一致） | 75ms |
+| `ls /system \| head -20` | `ls: /system: Permission denied` | 153ms |
+
+### 流式输出（`StreamShellOutputAsync`）
+
+`for i in 1 2 3; do echo line-$i; sleep 0.2; done` → 收到 **3 个块**（daemon 按行 flush），累计 21 字符，顺序正确。
+
+### 交互式 shell（`OpenInteractiveShellAsync`，走 2000/2001）
+
+```
+[chunk 2B] "$ "                                    ← PTY 提示符
+[send] echo ARITH=$((6*7))
+[chunk 3B] ech / [4B] o AR / [2B] IT / ...         ← 逐键回显（真实 PTY 行为）
+[chunk 12B] ARITH=42\r\n$ "                        ← 命令执行结果（算术求值证明非回显）
+```
+- Ctrl-C（0x03）发送成功（daemon 侧转 SIGINT，`src/daemon/shell.cpp:91-107`）
+- `DisposeAsync` 后写入 → `ObjectDisposedException` ✓
+
+### unity 1200 / TLV32（`ExecuteUnityAsync`）
+
+`ExecuteUnityAsync("echo unity-1200", new ShellOptions { BundleName = "com.example.sandbox" })`
+→ 设备回 `[E003001] Invalid bundle name: com.example.sandbox`
+
+**结论**：TLV32 载荷被 daemon 正确解析、`1200` 路径可达（错误仅因该沙箱包名在设备上不存在）。
+印证上游 `src/daemon/daemon_unity.cpp:138-172`「1200 强制要求命令 + 包名两个 tag」。
+
+### 新确认的协议事实
+
+**shell 载荷无任何包装结构**：全仓检索 `RawDataProtocol|raw_data_protocol` 命中数为 0（`developtools_hdc/src/` + `hdc_rust/src/`）——一次性 shell（1001）与交互式输入（2001）的载荷均为**原始字节**；输出经 `CMD_KERNEL_ECHO_RAW(10)` 下发；完成信号是 `CMD_KERNEL_CHANNEL_CLOSE` 载荷 `[1]`，无 `CMD_SHELL_EXIT` 命令（`src/common/task.cpp:49-58`）。
