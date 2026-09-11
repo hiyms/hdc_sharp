@@ -1,0 +1,31 @@
+name: docfx for GitHub Pages
+
+on:
+  push:
+    branches: [ "main" ]  # 在推送到 main 分支时触发
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4  # 必须手动检出代码
+
+      - name: Deploy Docs
+        uses: sator-imaging/docfx-pages@v1
+        id: deployment  # 用于获取部署后的页面 URL
+        with:
+          # 必填参数
+          app_name: 'HdcSharp'        # 应用名称，用于文档标识
+          site_title: 'Openharmony HDC for c#'   # 网站的标题
+          site_footer: 'Copyright ? 2026' # 页脚信息
+          # 可选参数
+          class_members: 'samePage'
