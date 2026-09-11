@@ -175,4 +175,44 @@ public sealed class HdcDevice
         };
         return ShellOperation.ExecuteAsync(this, HdcCommand.UnityExecuteEx, Tlv32.Serialize(entries), ct);
     }
+
+    /// <summary>
+    /// 向设备发送单个文件（WAKEUP_SLAVETASK + FILE_CHECK/BEGIN/DATA/FINISH，spec §4.7.1）：
+    /// 源文件缺失或不可读时在发出任何文件命令前抛出，不影响会话；
+    /// <paramref name="remotePath"/> 可以为已存在的设备端目录，daemon 会拼接本地文件名。
+    /// </summary>
+    /// <param name="localPath">本地源文件路径。</param>
+    /// <param name="remotePath">设备端目标路径。</param>
+    /// <param name="progress">进度回调，每发送一个数据块（≤48KiB）调用一次。<see cref="Progress{T}"/> 会回到同步上下文，高频场景建议自备轻量实现。</param>
+    /// <param name="ct">取消令牌；取消时发送 CHANNEL_CLOSE[0] 并清理通道。</param>
+    /// <returns>传输完成的任务；daemon 报错时以 <see cref="HdcException"/> 结束。</returns>
+    /// <exception cref="ArgumentException">路径为空。</exception>
+    /// <exception cref="System.IO.FileNotFoundException">本地源文件不存在。</exception>
+    /// <exception cref="HdcException">daemon 拒绝或连接断开。</exception>
+    public Task SendFileAsync(
+        string localPath, string remotePath, IProgress<FileProgress>? progress = null, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(localPath);
+        ArgumentException.ThrowIfNullOrEmpty(remotePath);
+        return FileOperation.SendAsync(this, localPath, remotePath, progress, ct);
+    }
+
+    /// <summary>
+    /// 从设备接收单个文件（FILE_INIT/CHECK/BEGIN/DATA/FINISH，spec §4.7.2）：daemon 作为主端读取设备文件并推送，
+    /// 本库作为从端落盘；本地父目录不存在时逐级创建，同名文件被截断。
+    /// </summary>
+    /// <param name="remotePath">设备端源文件路径。</param>
+    /// <param name="localPath">本地目标路径；传目录（或以目录分隔符结尾）时使用设备端文件名。</param>
+    /// <param name="progress">进度回调，每收到一个数据块调用一次。</param>
+    /// <param name="ct">取消令牌；取消时发送 CHANNEL_CLOSE[0] 并清理通道。</param>
+    /// <returns>传输完成的任务；设备文件不存在等 daemon 报错时以 <see cref="HdcException"/> 结束。</returns>
+    /// <exception cref="ArgumentException">路径为空。</exception>
+    /// <exception cref="HdcException">daemon 拒绝、连接断开或协议字段非法。</exception>
+    public Task ReceiveFileAsync(
+        string remotePath, string localPath, IProgress<FileProgress>? progress = null, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(remotePath);
+        ArgumentException.ThrowIfNullOrEmpty(localPath);
+        return FileOperation.ReceiveAsync(this, remotePath, localPath, progress, ct);
+    }
 }

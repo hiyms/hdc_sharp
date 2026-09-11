@@ -17,7 +17,7 @@ public enum HdcCommand : uint
     /// <summary>daemon→宿主原始输出字节流（shell/hilog 等）。</summary>
     KernelEchoRaw = 10,
 
-    /// <summary>daemon→宿主文件/应用任务预备信号，空载荷，收到即忽略。</summary>
+    /// <summary>主端→从端文件/应用任务预备信号，空载荷，收到即忽略；先于首个 CHECK 发送以预建对端任务槽。</summary>
     KernelWakeupSlavetask = 12,
 
     /// <summary>宿主→daemon 一次性 shell，载荷为命令字符串。</summary>
@@ -91,7 +91,7 @@ public enum HdcCommand : uint
     /// <summary>文件传输配置校验，载荷为 TransferConfig。</summary>
     FileCheck = 3001,
 
-    /// <summary>文件传输开始，载荷为空或 8 字节文件大小。</summary>
+    /// <summary>文件传输开始，从端→主端；载荷为空（Rust 世代）或 8 字节 FeatureFlags（C++ 世代，bit0=hugeBuf）。</summary>
     FileBegin = 3002,
 
     /// <summary>文件数据块（64 字节槽位布局）。</summary>

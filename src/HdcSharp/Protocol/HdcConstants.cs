@@ -38,6 +38,24 @@ public static class HdcConstants
     /// <summary>单个文件数据块最大 49152 字节（48KiB）。</summary>
     public const int MaxFileChunkSize = 49152;
 
+    /// <summary>FILE_FINISH 载荷：单文件完成。</summary>
+    internal const byte FileFinishOneFile = 1;
+
+    /// <summary>FILE_FINISH 载荷：整单完成（收到即整次传输结束）。</summary>
+    internal const byte FileFinishAll = 0;
+
+    /// <summary>FILE_INIT 参数串分隔符（空格）。</summary>
+    internal const string FileInitArgumentSeparator = " ";
+
+    /// <summary>
+    /// 宿主 CLI 的 file send 首词。仅存在于 client→本地 server 的命令串；上游 host 发往设备前剥离
+    /// （server_for_client.cpp:1081-1094），故设备侧 FILE_INIT 载荷不含该首词。
+    /// </summary>
+    internal const string FileInitVerbSend = "send";
+
+    /// <summary>宿主 CLI 的 file recv 首词；同样不进入发往设备的 FILE_INIT 载荷（hdc_rust/src/host/task.rs:100-103）。</summary>
+    internal const string FileInitVerbRecv = "recv";
+
     /// <summary>心跳间隔秒数（仅 C++ 世代且双方声明 heartbeat 时启用）。</summary>
     public const int HeartbeatIntervalSeconds = 5;
 
