@@ -104,6 +104,24 @@ public sealed class FakeDaemonOptions
     /// 在设备侧监听远端端口，并向宿主推 FORWARD_CHECK/ACTIVE_SLAVE。
     /// </summary>
     public bool ForwardReverseEnabled { get; set; }
+
+    /// <summary>单帧/hilog/bugreport 类 Unity 命令处理后依次回的 KERNEL_ECHO（daemon 的 LogMsg 回执与报错）；null 不回（对齐 C++ daemon 的 reboot，src/daemon/daemon_unity.cpp:452-455、system_depend.cpp:78-87）。</summary>
+    public IReadOnlyList<(MessageLevel Level, string Text)>? UnityEchoMessages { get; set; }
+
+    /// <summary>单帧 Unity 命令处理后是否发 CHANNEL_CLOSE[1]（daemon 的 TaskFinish 语义，src/common/task.cpp:49-59）。</summary>
+    public bool UnityClosesAfterCommand { get; set; } = true;
+
+    /// <summary>hilog 剧本（1005）：收到后依次下发的 ECHO_RAW(10) 分块；null 时只按关闭开关处理。</summary>
+    public IReadOnlyList<byte[]>? UnityHilogChunks { get; set; }
+
+    /// <summary>hilog 剧本发完分块后是否关通道；默认 false（hilog 为长命命令，C++ daemon 默认输出命令即 ECHO_RAW，daemon_unity.cpp:29、377-385）。</summary>
+    public bool UnityHilogClosesAfterOutput { get; set; }
+
+    /// <summary>bugreport 剧本（1011）：收到后依次下发的 UNITY_BUGREPORT_DATA(1012) 分块；null 时不接管。</summary>
+    public IReadOnlyList<byte[]>? UnityBugReportChunks { get; set; }
+
+    /// <summary>bugreport 分块发完后是否关通道（hidumper 执行结束语义），默认 true。</summary>
+    public bool UnityBugReportClosesAfterOutput { get; set; } = true;
 }
 
 /// <summary>
@@ -481,6 +499,18 @@ public sealed class FakeDaemon : IDisposable
                 break;
             case HdcCommand.UnityExecuteEx:
                 await RunShellOutputScriptAsync(stream, frame, string.Empty, ct);
+                break;
+            case HdcCommand.UnityRemount:
+            case HdcCommand.UnityReboot:
+            case HdcCommand.UnityRunmode:
+            case HdcCommand.UnityRootrun:
+                await RunUnitySingleFrameScriptAsync(stream, frame, ct);
+                break;
+            case HdcCommand.UnityHilog:
+                await RunHilogScriptAsync(stream, frame, ct);
+                break;
+            case HdcCommand.UnityBugreportInit:
+                await RunBugReportScriptAsync(stream, frame, ct);
                 break;
             case HdcCommand.ShellData when _options.InteractiveEcho:
                 await SendFrameAsync(stream, frame.ChannelId, HdcCommand.KernelEchoRaw, frame.Payload, ct);
@@ -1234,17 +1264,81 @@ public sealed class FakeDaemon : IDisposable
         {
             foreach ((MessageLevel level, string text) in messages)
             {
-                byte[] textBytes = Encoding.UTF8.GetBytes(text);
-                byte[] payload = new byte[textBytes.Length + 1];
-                payload[0] = (byte)level;
-                textBytes.CopyTo(payload, 1);
-                await SendFrameAsync(stream, frame.ChannelId, HdcCommand.KernelEcho, payload, ct);
+                await SendFrameAsync(stream, frame.ChannelId, HdcCommand.KernelEcho, BuildEchoPayload(level, text), ct);
             }
         }
 
         if (_options.ShellClosesAfterOutput)
         {
             await SendFrameAsync(stream, frame.ChannelId, HdcCommand.KernelChannelClose, [_options.ShellCloseHops], ct);
+        }
+    }
+
+    private static byte[] BuildEchoPayload(MessageLevel level, string text)
+    {
+        byte[] textBytes = Encoding.UTF8.GetBytes(text);
+        byte[] payload = new byte[textBytes.Length + 1];
+        payload[0] = (byte)level;
+        textBytes.CopyTo(payload, 1);
+        return payload;
+    }
+
+    private async Task RunUnitySingleFrameScriptAsync(NetworkStream stream, Frame frame, CancellationToken ct)
+    {
+        await SendUnityEchoesAsync(stream, frame.ChannelId, ct);
+
+        if (_options.UnityClosesAfterCommand)
+        {
+            await SendFrameAsync(stream, frame.ChannelId, HdcCommand.KernelChannelClose, [1], ct);
+        }
+    }
+
+    private async Task RunHilogScriptAsync(NetworkStream stream, Frame frame, CancellationToken ct)
+    {
+        if (_options.UnityHilogChunks is { } chunks)
+        {
+            foreach (byte[] chunk in chunks)
+            {
+                await SendFrameAsync(stream, frame.ChannelId, HdcCommand.KernelEchoRaw, chunk, ct);
+            }
+        }
+
+        await SendUnityEchoesAsync(stream, frame.ChannelId, ct);
+
+        if (_options.UnityHilogClosesAfterOutput)
+        {
+            await SendFrameAsync(stream, frame.ChannelId, HdcCommand.KernelChannelClose, [1], ct);
+        }
+    }
+
+    private async Task RunBugReportScriptAsync(NetworkStream stream, Frame frame, CancellationToken ct)
+    {
+        if (_options.UnityBugReportChunks is { } chunks)
+        {
+            foreach (byte[] chunk in chunks)
+            {
+                await SendFrameAsync(stream, frame.ChannelId, HdcCommand.UnityBugreportData, chunk, ct);
+            }
+        }
+
+        await SendUnityEchoesAsync(stream, frame.ChannelId, ct);
+
+        if (_options.UnityBugReportClosesAfterOutput)
+        {
+            await SendFrameAsync(stream, frame.ChannelId, HdcCommand.KernelChannelClose, [1], ct);
+        }
+    }
+
+    private async Task SendUnityEchoesAsync(NetworkStream stream, uint channelId, CancellationToken ct)
+    {
+        if (_options.UnityEchoMessages is not { } messages)
+        {
+            return;
+        }
+
+        foreach ((MessageLevel level, string text) in messages)
+        {
+            await SendFrameAsync(stream, channelId, HdcCommand.KernelEcho, BuildEchoPayload(level, text), ct);
         }
     }
 
@@ -1324,6 +1418,38 @@ public sealed class FakeDaemon : IDisposable
     public static FakeDaemon WithShellScript(params string[] chunks)
     {
         return new FakeDaemon(new FakeDaemonOptions { ShellChunks = chunks.Select(Encoding.UTF8.GetBytes).ToArray() });
+    }
+
+    /// <summary>创建“记录单帧 Unity 命令（1002/1003/1004/1007）并只关通道”的假 daemon（Rust 世代、免认证，对齐 C++ daemon 的 reboot 无回显行为）。</summary>
+    public static FakeDaemon WithUnityCapture()
+    {
+        return new FakeDaemon(new FakeDaemonOptions());
+    }
+
+    /// <summary>创建“单帧 Unity 命令回一条 KERNEL_ECHO 后关通道”的假 daemon（Rust 世代、免认证）。</summary>
+    /// <param name="level">ECHO 级别；Fail 用于覆盖 daemon 报错回显路径。</param>
+    /// <param name="text">ECHO 文本（不含级别字节，如 <c>"Mount finish"</c>）。</param>
+    public static FakeDaemon WithUnityEcho(MessageLevel level, string text)
+    {
+        return new FakeDaemon(new FakeDaemonOptions { UnityEchoMessages = [(level, text)] });
+    }
+
+    /// <summary>创建“收到 hilog（1005）后依次下发 ECHO_RAW 分块并关通道”的假 daemon（Rust 世代、免认证）。</summary>
+    /// <param name="chunks">原始输出分块（可跨帧切开行与多字节 UTF-8 字符）。</param>
+    public static FakeDaemon WithHilogScript(params byte[][] chunks)
+    {
+        return new FakeDaemon(new FakeDaemonOptions
+        {
+            UnityHilogChunks = chunks,
+            UnityHilogClosesAfterOutput = true,
+        });
+    }
+
+    /// <summary>创建“收到 bugreport（1011）后依次下发 BUGREPORT_DATA(1012) 分块并关通道”的假 daemon（Rust 世代、免认证）。</summary>
+    /// <param name="chunks">原始数据分块。</param>
+    public static FakeDaemon WithBugReportScript(params byte[][] chunks)
+    {
+        return new FakeDaemon(new FakeDaemonOptions { UnityBugReportChunks = chunks });
     }
 
     /// <summary>创建“交互式 shell 回显”的假 daemon（Rust 世代、免认证）。</summary>

@@ -330,4 +330,89 @@ public sealed class HdcDevice
     {
         return ForwardOperation.ReverseTcpAsync(this, remotePort, localPort, ct);
     }
+
+    /// <summary>
+    /// 重启设备（UNITY_REBOOT 1003，spec §4.10）：C++ daemon 把载荷拼成 <c>reboot,&lt;mode&gt;</c> 交给系统电源服务且
+    /// 成功不回显（src/daemon/daemon_unity.cpp:452-455、system_depend.cpp:78-87），Rust daemon 写
+    /// <c>ohos.startup.powerctrl</c> 并回 ECHO Ok。两世代均以通道关闭表示命令已被 daemon 受理，故本方法在通道关闭后返回；
+    /// 设备真正重启会随后断开连接，后续操作以 <see cref="HdcException"/> 收尾。
+    /// </summary>
+    /// <param name="mode">重启目标模式；默认普通重启（空载荷）。</param>
+    /// <param name="ct">取消令牌；取消时发送 CHANNEL_CLOSE[0] 并清理通道。</param>
+    /// <returns>命令受理的任务；daemon 回显 Fail 级错误时以 <see cref="HdcException"/> 结束。</returns>
+    /// <exception cref="ArgumentOutOfRangeException">重启模式不是已知枚举值（发送前即抛出，不影响会话）。</exception>
+    /// <exception cref="HdcException">daemon 拒绝或连接断开。</exception>
+    public Task RebootAsync(RebootMode mode = RebootMode.Default, CancellationToken ct = default)
+    {
+        return UnityOperation.SendSingleFrameAsync(this, HdcCommand.UnityReboot, UnityOperation.RebootPayload(mode), ct);
+    }
+
+    /// <summary>
+    /// 以可读写方式重新挂载设备分区（UNITY_REMOUNT 1002，空载荷，spec §4.10）。
+    /// daemon 要求 <c>const.debuggable=1</c> 且自身以 root 运行，否则回 ECHO Fail（如 <c>[E007100]</c>）并结束。
+    /// C++ daemon 成功后回 ECHO Ok <c>Mount finish</c>（src/daemon/daemon_unity.cpp:282-313），两世代均以通道关闭收尾。
+    /// </summary>
+    /// <param name="ct">取消令牌；取消时发送 CHANNEL_CLOSE[0] 并清理通道。</param>
+    /// <returns>命令受理的任务；daemon 回显 Fail 级错误时以 <see cref="HdcException"/> 结束。</returns>
+    /// <exception cref="HdcException">daemon 拒绝（非调试版本/非 root）或连接断开。</exception>
+    public Task RemountAsync(CancellationToken ct = default)
+    {
+        return UnityOperation.SendSingleFrameAsync(this, HdcCommand.UnityRemount, [], ct);
+    }
+
+    /// <summary>
+    /// 切换 daemon 的启动权限（UNITY_ROOTRUN 1007，spec §4.10；上游 CLI 的 <c>smode</c>）：
+    /// 载荷为空表示以 root 运行（C++ daemon 写 <c>persist.hdc.root=1</c>），载荷 <c>r</c> 表示取消 root
+    /// （写 <c>0</c>），对应 CLI 的 <c>-r</c>（src/host/translate.cpp:583-587、daemon_unity.cpp:466-486）。
+    /// daemon 会重启自身，通道随即关闭；非调试版本回 ECHO Fail <c>Cannot set root run mode in undebuggable version.</c>。
+    /// </summary>
+    /// <param name="unroot">true 表示取消 root 权限（载荷 <c>r</c>）；默认 false 表示以 root 运行。</param>
+    /// <param name="ct">取消令牌；取消时发送 CHANNEL_CLOSE[0] 并清理通道。</param>
+    /// <returns>命令受理的任务；daemon 回显 Fail 级错误时以 <see cref="HdcException"/> 结束。</returns>
+    /// <exception cref="HdcException">daemon 拒绝（非调试版本）或连接断开。</exception>
+    public Task RootRunAsync(bool unroot = false, CancellationToken ct = default)
+    {
+        byte[] payload = unroot ? [(byte)'r'] : [];
+        return UnityOperation.SendSingleFrameAsync(this, HdcCommand.UnityRootrun, payload, ct);
+    }
+
+    /// <summary>
+    /// 设置 daemon 运行模式（UNITY_RUNMODE 1004，spec §4.10；上游 CLI 的 <c>tmode</c>）。
+    /// 载荷由 <see cref="RunMode"/> 决定（<c>usb</c> / <c>port</c> / <c>port &lt;n&gt;</c> / <c>port close</c>），
+    /// daemon 写系统参数后可能重启自身并关闭通道；无法识别的载荷由 daemon 回 ECHO Fail（如 Rust 世代对 <c>port</c>）。
+    /// </summary>
+    /// <param name="mode">目标运行模式。</param>
+    /// <param name="ct">取消令牌；取消时发送 CHANNEL_CLOSE[0] 并清理通道。</param>
+    /// <returns>命令受理的任务；daemon 回显 Fail 级错误时以 <see cref="HdcException"/> 结束。</returns>
+    /// <exception cref="HdcException">daemon 拒绝（如 USB 模式提示改在设备设置界面开启）或连接断开。</exception>
+    public Task SetRunModeAsync(RunMode mode, CancellationToken ct = default)
+    {
+        return UnityOperation.SendSingleFrameAsync(this, HdcCommand.UnityRunmode, Encoding.UTF8.GetBytes(mode.Payload), ct);
+    }
+
+    /// <summary>
+    /// 流式读取设备 hilog（UNITY_HILOG 1005，空载荷，spec §4.10）：daemon 执行 <c>hilog</c> 并把输出以
+    /// ECHO_RAW(10) 下发（src/daemon/daemon_unity.cpp:29、377-385），本方法按 <c>\n</c> 切分为整行产出。
+    /// hilog 是长命命令，通常不会自行结束：取消令牌、消费方提前退出或连接断开是正常终止路径；若 daemon 命令结束，则以通道关闭终止。
+    /// </summary>
+    /// <param name="ct">取消令牌；取消或消费方提前退出时发送 CHANNEL_CLOSE[0] 后清理通道。</param>
+    /// <returns>行序列（不含行尾换行；末尾无换行的残留内容作为最后一行产出）。</returns>
+    /// <exception cref="HdcException">daemon 回显 Fail 级错误或连接断开。</exception>
+    public IAsyncEnumerable<string> StreamHilogAsync(CancellationToken ct = default)
+    {
+        return UnityOperation.StreamHilogAsync(this, ct);
+    }
+
+    /// <summary>
+    /// 流式采集设备 bugreport（BUGREPORT_INIT 1011 空载荷发往 daemon，输出经 BUGREPORT_DATA 1012 分块回流，spec §4.10）：
+    /// daemon 侧执行 <c>hidumper</c>（src/daemon/daemon_unity.cpp:487-490、hdc_rust/src/daemon_lib/task.rs:258-268）。
+    /// 分块原样产出、不落盘也不解压，写入文件或转发由调用方决定；daemon 输出结束即关闭通道。
+    /// </summary>
+    /// <param name="ct">取消令牌；取消或消费方提前退出时发送 CHANNEL_CLOSE[0] 后清理通道。</param>
+    /// <returns>数据分块序列（空分块不产出）。</returns>
+    /// <exception cref="HdcException">daemon 回显 Fail 级错误或连接断开。</exception>
+    public IAsyncEnumerable<byte[]> StreamBugReportAsync(CancellationToken ct = default)
+    {
+        return UnityOperation.StreamBugReportAsync(this, ct);
+    }
 }
