@@ -304,7 +304,9 @@ namespace HdcSharp;
 
 public sealed class HdcHost : IAsyncDisposable
 {
-    public event EventHandler<DeviceStateChangedEventArgs>? DeviceStateChanged;
+    public event EventHandler<DeviceStateChangedEventArgs>? DeviceStateChanged;   // 状态迁移（Connecting/Authorizing/Online/Offline）
+    public event EventHandler<string>? AuthorizationRequested;                    // 设备端弹窗授权待人工确认（参数=connectKey）
+    public event EventHandler<DeviceDisconnectedEventArgs>? DeviceDisconnected;  // 连接断开（含异常断开），设备已从注册表移除
     public IReadOnlyList<HdcDevice> ConnectedDevices { get; }
     public HdcDevice? FindDevice(string connectKey);
     public Task<HdcDevice> ConnectAsync(string endpoint, ConnectOptions? options = null, CancellationToken ct = default);
@@ -324,9 +326,11 @@ public sealed class ConnectOptions
 public sealed class HdcDevice
 {
     public string ConnectKey { get; }                 // "ip:port"
+    public string Endpoint { get; }                   // ConnectKey 的语义别名
     public string DeviceName { get; }                 // 握手 AUTH_OK 所得 devname
+    public uint SessionId { get; }                    // 本次会话的随机 sessionId
     public HdcDeviceState State { get; }
-    public DaemonGeneration Generation { get; }
+    public DaemonGeneration Generation { get; }       // 能力指纹：决定心跳/命令可用性
     public Task<string> ExecuteShellAsync(string command, CancellationToken ct = default);
     public IAsyncEnumerable<byte[]> StreamShellOutputAsync(string command, CancellationToken ct = default);
     public Task<IInteractiveShell> OpenInteractiveShellAsync(CancellationToken ct = default);
@@ -356,8 +360,15 @@ public interface IInteractiveShell : IAsyncDisposable
 
 public interface IForwardSession : IAsyncDisposable
 {
-    int ListenPort { get; }  ForwardDirection Direction { get; }
-    bool IsActive { get; }  event EventHandler? Closed;
+    int ListenPort { get; }
+    ForwardDirection Direction { get; }
+    bool IsActive { get; }
+    event EventHandler? Closed;
+}
+
+public sealed class DeviceDisconnectedEventArgs : EventArgs
+{
+    public string Key { get; }                        // connectKey
 }
 ```
 
