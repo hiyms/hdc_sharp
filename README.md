@@ -186,8 +186,10 @@ pwsh -File scripts/build-docs.ps1 -Serve
 pwsh -File scripts/build-docs.ps1 -Clean
 ```
 
-- 配置：`docfx.json`（元数据源 `src/HdcSharp/HdcSharp.csproj`，模板 `default` + `default(zh-cn)` 中文 UI）
-- 导航：`toc.yml`（站点）+ `docs/toc.yml`（设计文档子目录）+ `index.md`（站点首页）
+- 模板：`default` + `modern`（与 docfx 官网同款：**全站常驻左侧栏**、响应式、暗色主题、搜索），叠加自定义层 `templates/hdcsharp-zh/` 提供中文 UI（`token.json` 词条 + `partials/title.tmpl.partial` 覆盖 API 页标题如「HdcHost 类」）
+- 导航：`toc.yml` = 顶部导航（不含首页——首页由导航栏品牌进入，与 docfx 官网一致）；`site/toc.yml` = 首页与 README 的左侧栏；`docs/toc.yml` = 设计文档分区
+- 首页与站点内 README 位于 `site/`（`dest` 映射使首页输出到站点根）：左侧栏仅在页面所属 toc ≠ 顶部 toc 时渲染，故首页必须归属于某个分区 toc，这是 docfx modern 模板的既定机制
+- `site/readme-full.md` 由 `scripts/build-docs.ps1` 在构建时从仓库根 `README.md` 生成（相对链接自动上跳一层），**不存在两份手写文档**；若 README 出现新的相对链接形态，docfx 链接校验会以警告暴露并让门禁失败
 - 产物：`api/*.yml`（API 元数据）与 `artifacts/docs/`（HTML 站点），二者均已 gitignore，由脚本随时重建
 - docfx 以本地工具固定版本（`dotnet-tools.json`）：首次在干净机器上需网络还原 NuGet 包，之后离线可构建
 - 门禁：`scripts/build-docs.ps1` 会校验首页/API 目录/搜索索引存在，且 API 页数量不少于公共类型数；docfx 产生任何警告都会让 `verify-all.ps1` 的第 8 项失败

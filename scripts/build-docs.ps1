@@ -31,6 +31,14 @@ try {
 
     # 单条 docfx 命令同时跑 metadata 与 build：docfx.json 内 metadata 段 + build 段。
     # 不得使用 -SuppressWarnings：警告（失效链接等）应当让门禁失败，避免文档静默腐化。
+    # 站点内的 README 副本：由仓库根 README.md 生成，避免两份手写文档漂移。
+    # 相对链接需上跳一层（site/ → 仓库根）；若 README 出现新的相对链接形态，
+    # docfx 的链接校验会以警告形式暴露，进而让本步骤失败（脚本不静默放过）。
+    Write-Host '生成站点内的 README 副本（site/readme-full.md）' -ForegroundColor Cyan
+    $readme = Get-Content 'README.md' -Raw
+    $readme = $readme -replace '\]\((docs|scripts|samples|tests|src)/', '](../$1/'
+    Set-Content 'site/readme-full.md' $readme -NoNewline -Encoding utf8
+
     Write-Host '生成文档（metadata + build）' -ForegroundColor Cyan
     dotnet docfx docfx.json
     if ($LASTEXITCODE -ne 0) { throw "docfx 生成失败（退出码 $LASTEXITCODE）" }
@@ -42,7 +50,8 @@ try {
         'index.json',
         'api/toc.html',
         'api/HdcSharp.HdcHost.html',
-        'api/HdcSharp.HdcDevice.html'
+        'api/HdcSharp.HdcDevice.html',
+        'site/readme-full.html'
     )
     foreach ($file in $required) {
         if (-not (Test-Path (Join-Path $siteDir $file))) { throw "缺少产物 $siteDir/$file" }

@@ -7,3 +7,5 @@ artifacts/
 .ralph/
 # docfx 生成的 API 元数据与站点
 api/
+# docfx 构建期由 README.md 生成的站点副本（避免两份手写文档漂移）
+site/readme-full.md

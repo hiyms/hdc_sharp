@@ -2,7 +2,7 @@
 
 纯 C# 实现的 **OpenHarmony HDC 宿主侧/客户端协议库**（非 daemon、非 `hdc.exe` 替代品）。供 C# 程序经 WiFi/TCP 控制 OpenHarmony 设备：shell、文件与目录收发、应用安装卸载、端口转发、hilog/bugreport 等。
 
-API 文档由源码中的中文 XML 文档注释生成；功能范围、快速开始与已知限制见 [README](README.md)。
+API 文档由源码中的中文 XML 文档注释生成；功能范围、快速开始与已知限制见 [README](readme-full.md)。
 
 ## 功能一览
 
@@ -20,10 +20,10 @@ API 文档由源码中的中文 XML 文档注释生成；功能范围、快速�
 | 文档 | 内容 |
 |---|---|
 | [API 参考](xref:HdcSharp) | 按命名空间组织的公共 API（含低层协议原语与传输层） |
-| [设计规格](docs/superpowers/specs/2026-09-09-hdcsharp-design.md) | 协议细节、架构、公共 API 冻结基线、错误处理、安全 |
-| [实施计划](docs/superpowers/plans/2026-09-09-hdcsharp-implementation.md) | 20 个 TDD 任务的拆分与验收标准 |
-| [真机验证记录](docs/verification/2026-09-11-real-device-connect.md) | C++ 世代真机（`192.168.2.161:44221`）逐项实测证据与复现命令 |
-| [README](README.md) | 快速开始、依赖与目标框架、AOT 说明、测试与验证、已知限制 |
+| [设计规格](../docs/superpowers/specs/2026-09-09-hdcsharp-design.md) | 协议细节、架构、公共 API 冻结基线、错误处理、安全 |
+| [实施计划](../docs/superpowers/plans/2026-09-09-hdcsharp-implementation.md) | 20 个 TDD 任务的拆分与验收标准 |
+| [真机验证记录](../docs/verification/2026-09-11-real-device-connect.md) | C++ 世代真机（`192.168.2.161:44221`）逐项实测证据与复现命令 |
+| [README](readme-full.md) | 快速开始、依赖与目标框架、AOT 说明、测试与验证、已知限制 |
 
 ## 目标框架与依赖
 

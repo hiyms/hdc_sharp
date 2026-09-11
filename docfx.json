@@ -5,7 +5,9 @@
       "src": [
         {
           "src": "src/HdcSharp",
-          "files": [ "HdcSharp.csproj" ]
+          "files": [
+            "HdcSharp.csproj"
+          ]
         }
       ],
       "dest": "api",
@@ -18,28 +20,73 @@
   "build": {
     "content": [
       {
-        "files": [ "api/*.yml" ]
+        "files": [
+          "api/*.yml"
+        ]
       },
       {
-        "files": [ "index.md", "README.md", "toc.yml" ]
+        "files": [
+          "toc.yml"
+        ]
       },
       {
-        "files": [ "docs/**/*.md", "docs/toc.yml" ],
-        "exclude": [ "**/bin/**", "**/obj/**" ]
+        "src": "site",
+        "files": [
+          "index.md"
+        ],
+        "dest": "."
       },
       {
-        "files": [ "tests/**/README.md" ],
-        "exclude": [ "**/bin/**", "**/obj/**" ]
+        "src": "site",
+        "files": [
+          "readme-full.md",
+          "toc.yml"
+        ],
+        "dest": "site"
+      },
+      {
+        "files": [
+          "docs/**/*.md",
+          "docs/toc.yml"
+        ],
+        "exclude": [
+          "**/bin/**",
+          "**/obj/**"
+        ]
+      },
+      {
+        "files": [
+          "tests/**/README.md"
+        ],
+        "exclude": [
+          "**/bin/**",
+          "**/obj/**"
+        ]
       }
     ],
     "resource": [
       {
-        "files": [ "**/*.png", "**/*.jpg", "**/*.jpeg", "**/*.gif", "**/*.svg" ],
-        "exclude": [ "artifacts/**", "**/bin/**", "**/obj/**", "**/.git/**" ]
+        "files": [
+          "**/*.png",
+          "**/*.jpg",
+          "**/*.jpeg",
+          "**/*.gif",
+          "**/*.svg"
+        ],
+        "exclude": [
+          "artifacts/**",
+          "**/bin/**",
+          "**/obj/**",
+          "**/.git/**"
+        ]
       }
     ],
     "dest": "artifacts/docs",
-    "template": [ "default", "default(zh-cn)" ],
+    "template": [
+      "default",
+      "modern",
+      "templates/hdcsharp-zh"
+    ],
     "markdownEngineName": "markdig",
     "noLangKeyword": false,
     "keepFileLink": false,
