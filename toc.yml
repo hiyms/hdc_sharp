@@ -1,7 +1,0 @@
-# 顶部导航（_navRel）。首页不放这里：与 dotnet.github.io/docfx 一致，
-# 首页由导航栏左侧品牌链接（_master.tmpl 的 navbar-brand → index.html）进入，
-# 其左侧栏来自 site/toc.yml（首页的 _tocRel），从而获得常驻侧边栏。
-- name: API 参考
-  href: api/
-- name: 设计文档
-  href: docs/
