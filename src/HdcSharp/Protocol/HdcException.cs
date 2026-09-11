@@ -33,6 +33,12 @@ public sealed class HdcException : Exception
         Level = level;
     }
 
+    /// <summary>创建带内层异常的 HDC 异常（库内部使用）。</summary>
+    internal HdcException(string message, Exception innerException)
+        : base(message, innerException)
+    {
+    }
+
     /// <summary>设备端/协议错误码，无则为 null。</summary>
     public string? ErrorCode { get; }
 
