@@ -247,3 +247,47 @@ cd D:/work/hdc_sharp && dotnet test tests/HdcSharp.Tests
 - `APP_FINISH` 载荷 `[mode][success][bm 文本]`；`success=0` 时以文本与首个 `[Exxxxxx]` 作 `HdcException` 抛出
 
 **诚实标注**：真实应用包的安装成功路径与目录安装（真实 hap 目录）在本机缺少可用包的前提下**未验证**，已在计划 Task 19 的真机集成测试中标注为需真实包方可覆盖。
+
+---
+
+## 9. 真机端口转发验证（Task 17，同日追加）
+
+探针：`D:\work\hdc-probe\fport-probe.cs`、`D:\work\hdc-probe\rport-probe.cs`
+
+### 9.1 fport（本地端口 → 设备端口）
+
+`ForwardTcpAsync(0, 44221)`（设备 44221 = hdcd 本体）→ 本地监听 61015。
+
+**用最强验证**：再起一个 `HdcHost` 经隧道连接设备自身 hdcd，跑完整会话——
+
+```
+✅ 经隧道完成握手+认证：DeviceName=localhost Generation=Cpp State=Online
+✅ 经隧道执行 shell：TUNNELED-SHELL-OK
+✅ 经隧道传 40KB 载荷：设备回 40000（期望 40000）
+已释放转发：IsActive=False
+✅ 释放后连接被拒：SocketException
+```
+
+即隧道承载了完整握手、约 1KB 的认证往返、shell 命令与 40KB 数据，双向无损；释放后监听端口立即关闭。
+
+### 9.2 rport（设备端口 → 本地端口）
+
+`ReverseTcpAsync(28765, <本地端口>)`；本地起最小 FTP 响应服务作为被转发目标；在设备上以 `ftpput -p 28765 127.0.0.1 …` 主动发起连接。
+
+```
+rport 建立成功：设备侧监听端口=28765 Direction=Reverse IsActive=True
+设备侧 netstat: tcp 0 0 127.0.0.1:28765 0.0.0.0:* LISTEN
+
+设备侧 ftpput 输出：              本地服务日志：
+220 hdcsharp-fake-ftp             [本地服务] 接受来自 127.0.0.1:61060 的连接（经 rport 隧道）
+USER anonymous                    [本地服务] 已发送问候 220（23 字节）
+331 need password                 [本地服务] 收到 16 字节: USER anonymous
+PASS ftpget@                      [本地服务] 收到 14 字节: PASS ftpget@
+230 logged in                     [本地服务] 收到 8 字节: TYPE I
+TYPE I                            [本地服务] 收到 6 字节: PASV
+200 ok
+PASV
+```
+
+**结论**：双向数据流完全正确（设备→主机与应用层往返均验证）；`DisposeAsync` 后 `IsActive=False`。
+`ReverseTcpAsync(0, …)` 会抛 `ArgumentOutOfRangeException`（设备侧监听端口必须显式指定，无"自动分配"语义）——符合设计预期。
