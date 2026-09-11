@@ -1,0 +1,310 @@
+TYPE sealed class HdcSharp.ConnectOptions
+  CTOR ()
+  PROP TimeSpan AuthTimeout{ get; init; }
+  PROP Boolean EnableEncryption{ get; init; }
+  PROP Boolean Heartbeat{ get; init; }
+  PROP IHostKeyStore KeyStore{ get; init; }
+  PROP TimeSpan OperationTimeout{ get; init; }
+TYPE sealed class HdcSharp.DeviceDisconnectedEventArgs
+  CTOR (String key)
+  PROP String Key{ get; }
+TYPE sealed class HdcSharp.DeviceStateChangedEventArgs
+  CTOR (String key, HdcDeviceState oldState, HdcDeviceState newState)
+  PROP String Key{ get; }
+  PROP HdcDeviceState NewState{ get; }
+  PROP HdcDeviceState OldState{ get; }
+TYPE struct HdcSharp.FileProgress
+  CTOR (Int64 BytesTransferred, Int64? TotalBytes, String FileName)
+  PROP Int64 BytesTransferred{ get; init; }
+  PROP String FileName{ get; init; }
+  PROP Int64? TotalBytes{ get; init; }
+  METHOD Void Deconstruct(Int64& BytesTransferred, Int64?& TotalBytes, String& FileName)
+  METHOD Boolean Equals(FileProgress other)
+  METHOD Boolean Equals(Object obj)
+  METHOD Int32 GetHashCode()
+  METHOD String ToString()
+TYPE enum HdcSharp.ForwardDirection
+  FIELD ForwardDirection Forward = 0
+  FIELD ForwardDirection Reverse = 1
+  FIELD Int32 value__
+TYPE sealed class HdcSharp.HdcDevice
+  PROP String ConnectKey{ get; }
+  PROP String DeviceName{ get; }
+  PROP String Endpoint{ get; }
+  PROP DaemonGeneration Generation{ get; }
+  PROP UInt32 SessionId{ get; }
+  PROP HdcDeviceState State{ get; }
+  EVENT EventHandler<DeviceStateChangedEventArgs> StateChanged
+  METHOD Task<String> ExecuteShellAsync(String command, CancellationToken ct = null)
+  METHOD Task<String> ExecuteUnityAsync(String command, ShellOptions options = null, CancellationToken ct = null)
+  METHOD Task<IForwardSession> ForwardTcpAsync(Int32 localPort, Int32 remotePort, CancellationToken ct = null)
+  METHOD Task<String> InstallAsync(String packagePath, InstallOptions options = null, CancellationToken ct = null)
+  METHOD Task<IInteractiveShell> OpenInteractiveShellAsync(CancellationToken ct = null)
+  METHOD Task RebootAsync(RebootMode mode = Default, CancellationToken ct = null)
+  METHOD Task ReceiveDirectoryAsync(String remoteDir, String localDir, IProgress<FileProgress> progress = null, CancellationToken ct = null)
+  METHOD Task ReceiveFileAsync(String remotePath, String localPath, IProgress<FileProgress> progress = null, CancellationToken ct = null)
+  METHOD Task RemountAsync(CancellationToken ct = null)
+  METHOD Task<IForwardSession> ReverseTcpAsync(Int32 remotePort, Int32 localPort, CancellationToken ct = null)
+  METHOD Task RootRunAsync(Boolean unroot = False, CancellationToken ct = null)
+  METHOD Task SendDirectoryAsync(String localDir, String remoteDir, IProgress<FileProgress> progress = null, CancellationToken ct = null)
+  METHOD Task SendFileAsync(String localPath, String remotePath, IProgress<FileProgress> progress = null, CancellationToken ct = null)
+  METHOD Task SetRunModeAsync(RunMode mode, CancellationToken ct = null)
+  METHOD IAsyncEnumerable<Byte[]> StreamBugReportAsync(CancellationToken ct = null)
+  METHOD IAsyncEnumerable<String> StreamHilogAsync(CancellationToken ct = null)
+  METHOD IAsyncEnumerable<Byte[]> StreamShellOutputAsync(String command, CancellationToken ct = null)
+  METHOD Task<String> UninstallAsync(String packageName, UninstallOptions options = null, CancellationToken ct = null)
+TYPE enum HdcSharp.HdcDeviceState
+  FIELD HdcDeviceState Authorizing = 1
+  FIELD HdcDeviceState Connecting = 0
+  FIELD HdcDeviceState Offline = 3
+  FIELD HdcDeviceState Online = 2
+  FIELD Int32 value__
+TYPE sealed class HdcSharp.HdcHost
+  CTOR ()
+  PROP IReadOnlyList<HdcDevice> ConnectedDevices{ get; }
+  EVENT EventHandler<String> AuthorizationRequested
+  EVENT EventHandler<DeviceDisconnectedEventArgs> DeviceDisconnected
+  EVENT EventHandler<DeviceStateChangedEventArgs> DeviceStateChanged
+  METHOD Task<HdcDevice> ConnectAsync(String endpoint, ConnectOptions options = null, CancellationToken ct = null)
+  METHOD Task<Boolean> DisconnectAsync(String connectKey, CancellationToken ct = null)
+  METHOD ValueTask DisposeAsync()
+  METHOD HdcDevice FindDevice(String connectKey)
+TYPE interface HdcSharp.IForwardSession
+  PROP ForwardDirection Direction{ get; }
+  PROP Boolean IsActive{ get; }
+  PROP Int32 ListenPort{ get; }
+  EVENT EventHandler Closed
+TYPE interface HdcSharp.IInteractiveShell
+  PROP Stream Input{ get; }
+  PROP ChannelReader<Byte[]> Output{ get; }
+  METHOD Task WaitUntilClosedAsync(CancellationToken ct = null)
+TYPE sealed class HdcSharp.InstallOptions
+  CTOR ()
+  PROP Boolean Downgrade{ get; set; }
+  PROP Boolean GrantPermissions{ get; set; }
+  PROP Boolean Replace{ get; set; }
+  PROP Boolean Shared{ get; set; }
+TYPE struct HdcSharp.Protocol.Frame
+  CTOR (UInt32 ChannelId, HdcCommand Command, Byte[] Payload)
+  PROP UInt32 ChannelId{ get; init; }
+  PROP HdcCommand Command{ get; init; }
+  PROP Byte[] Payload{ get; init; }
+  METHOD Void Deconstruct(UInt32& ChannelId, HdcCommand& Command, Byte[]& Payload)
+  METHOD Boolean Equals(Frame other)
+  METHOD Boolean Equals(Object obj)
+  METHOD Int32 GetHashCode()
+  METHOD String ToString()
+TYPE sealed class HdcSharp.Protocol.FrameCodec
+  METHOD Byte[] Encode(UInt32 channelId, HdcCommand cmd, ReadOnlySpan<Byte> payload)
+  METHOD Void Encode(UInt32 channelId, HdcCommand cmd, ReadOnlySpan<Byte> payload, IBufferWriter<Byte> sink)
+TYPE sealed class HdcSharp.Protocol.FrameDecoder
+  CTOR ()
+  METHOD Void Append(ReadOnlySpan<Byte> data)
+  METHOD Boolean TryRead(Frame& frame)
+TYPE enum HdcSharp.Protocol.HdcCommand
+  FIELD HdcCommand AppBegin = 3502
+  FIELD HdcCommand AppCheck = 3501
+  FIELD HdcCommand AppData = 3503
+  FIELD HdcCommand AppFinish = 3504
+  FIELD HdcCommand AppInit = 3500
+  FIELD HdcCommand AppUninstall = 3505
+  FIELD HdcCommand DirMode = 3007
+  FIELD HdcCommand FileBegin = 3002
+  FIELD HdcCommand FileCheck = 3001
+  FIELD HdcCommand FileData = 3003
+  FIELD HdcCommand FileFinish = 3004
+  FIELD HdcCommand FileInit = 3000
+  FIELD HdcCommand FileMode = 3006
+  FIELD HdcCommand ForwardActiveMaster = 2504
+  FIELD HdcCommand ForwardActiveSlave = 2503
+  FIELD HdcCommand ForwardCheck = 2501
+  FIELD HdcCommand ForwardCheckResult = 2502
+  FIELD HdcCommand ForwardData = 2505
+  FIELD HdcCommand ForwardFreeContext = 2506
+  FIELD HdcCommand ForwardInit = 2500
+  FIELD HdcCommand ForwardList = 2507
+  FIELD HdcCommand ForwardRemove = 2508
+  FIELD HdcCommand ForwardSuccess = 2509
+  FIELD HdcCommand HeartbeatMsg = 5000
+  FIELD HdcCommand KernelChannelClose = 2
+  FIELD HdcCommand KernelEcho = 9
+  FIELD HdcCommand KernelEchoRaw = 10
+  FIELD HdcCommand KernelHandshake = 1
+  FIELD HdcCommand KernelWakeupSlavetask = 12
+  FIELD HdcCommand ShellData = 2001
+  FIELD HdcCommand ShellInit = 2000
+  FIELD HdcCommand UnityBugreportData = 1012
+  FIELD HdcCommand UnityBugreportInit = 1011
+  FIELD HdcCommand UnityExecute = 1001
+  FIELD HdcCommand UnityExecuteEx = 1200
+  FIELD HdcCommand UnityHilog = 1005
+  FIELD HdcCommand UnityReboot = 1003
+  FIELD HdcCommand UnityRemount = 1002
+  FIELD HdcCommand UnityRootrun = 1007
+  FIELD HdcCommand UnityRunmode = 1004
+  FIELD UInt32 value__
+TYPE sealed class HdcSharp.Protocol.HdcConstants
+  FIELD String AuthStatusSuccess = SUCCESS
+  FIELD String AuthStatusUnauth = DAEMON_UNAUTH
+  FIELD String HandshakeFailed = HS FAILED
+  FIELD String HandshakeMessage = OHOS HDC
+  FIELD Int32 HeartbeatIntervalSeconds = 5
+  FIELD Byte HostDaemonBufSeparator = 12
+  FIELD String HostVersion = Ver: 3.2.0f
+  FIELD Int32 MaxFileChunkSize = 49152
+  FIELD String MinDaemonVersion = Ver: 3.0.0b
+  FIELD String PacketFlag = HW
+  FIELD Int32 PayloadHeadSize = 11
+  FIELD Byte PayloadVCode = 9
+  FIELD Byte ProtocolVer = 1
+  FIELD String TlvAuthType = authtype
+  FIELD String TlvDaemonAuthStatus = daemonauthstatus
+  FIELD String TlvDevName = devname
+  FIELD String TlvEmgMsg = emgmsg
+  FIELD String TlvShellOpt = 1200
+  FIELD String TlvSupportFeatures = supportfeatures
+  FIELD Int32 TransferSlotSize = 64
+TYPE sealed class HdcSharp.Protocol.HdcException
+  CTOR (String message, String errorCode = null, MessageLevel level = Fail)
+  PROP String ErrorCode{ get; }
+  PROP MessageLevel Level{ get; }
+TYPE enum HdcSharp.Protocol.MessageLevel
+  FIELD MessageLevel Fail = 0
+  FIELD MessageLevel Info = 1
+  FIELD MessageLevel Ok = 2
+  FIELD Int32 value__
+TYPE sealed class HdcSharp.Protocol.SerialStruct.SerialReader
+  CTOR (ReadOnlySpan<Byte> data)
+  PROP Int32 Field{ get; set; }
+  METHOD String ReadString()
+  METHOD Boolean ReadTag(Int32& field, Byte& wireType)
+  METHOD UInt64 ReadVarint()
+TYPE sealed class HdcSharp.Protocol.SerialStruct.SerialWriter
+  CTOR ()
+  METHOD Byte[] ToArray()
+  METHOD SerialWriter WriteStringField(Int32 field, String value)
+  METHOD SerialWriter WriteTag(Int32 field, Byte wireType)
+  METHOD SerialWriter WriteVarint(UInt64 value)
+  METHOD SerialWriter WriteVarintField(Int32 field, UInt64 value)
+TYPE sealed class HdcSharp.Protocol.SerialStruct.WireType
+  FIELD Byte Len = 2
+  FIELD Byte Varint = 0
+TYPE enum HdcSharp.Protocol.Tar.TarEntryType
+  FIELD TarEntryType Directory = 53
+  FIELD TarEntryType NormalFile = 48
+  FIELD Int32 value__
+TYPE sealed class HdcSharp.Protocol.Tar.TarHeader
+  FIELD Int32 BlockSize = 512
+  METHOD Boolean IsZeroBlock(ReadOnlySpan<Byte> block)
+  METHOD TarHeaderInfo Parse(ReadOnlySpan<Byte> block)
+  METHOD Void Write(IBufferWriter<Byte> sink, String name, Int64 size, TarEntryType type)
+  METHOD Void WriteTo(Span<Byte> block, String name, Int64 size, TarEntryType type)
+TYPE struct HdcSharp.Protocol.Tar.TarHeaderInfo
+  CTOR (String Name, Int64 Size, TarEntryType Type)
+  PROP String Name{ get; init; }
+  PROP Int64 Size{ get; init; }
+  PROP TarEntryType Type{ get; init; }
+  METHOD Void Deconstruct(String& Name, Int64& Size, TarEntryType& Type)
+  METHOD Boolean Equals(Object obj)
+  METHOD Boolean Equals(TarHeaderInfo other)
+  METHOD Int32 GetHashCode()
+  METHOD String ToString()
+TYPE sealed class HdcSharp.Protocol.Tar.TarReader
+  CTOR (Stream stream)
+  METHOD Int32 ReadContent(Span<Byte> buffer)
+  METHOD Void SkipToNextEntry()
+  METHOD Boolean TryReadEntry(TarHeaderInfo& info)
+TYPE sealed class HdcSharp.Protocol.Tar.TarWriter
+  CTOR (Stream stream)
+  METHOD Void AddDirectory(String entryName)
+  METHOD Void AddFile(String entryName, Stream content)
+  METHOD Void Finish()
+TYPE sealed class HdcSharp.Protocol.Tlv16
+  METHOD Byte[] Encode(ValueTuple<String, String> item)
+  METHOD Dictionary<String, String> Parse(String buf)
+  METHOD String Serialize(IEnumerable<ValueTuple<String, String>> items)
+TYPE sealed class HdcSharp.Protocol.Tlv32
+  FIELD UInt32 TagShellBundle = 1
+  FIELD UInt32 TagShellCmd = 0
+  METHOD Dictionary<UInt32, Byte[]> Parse(ReadOnlySpan<Byte> data)
+  METHOD Byte[] Serialize(IReadOnlyDictionary<UInt32, Byte[]> entries)
+TYPE enum HdcSharp.RebootMode
+  FIELD RebootMode Bootloader = 1
+  FIELD RebootMode Default = 0
+  FIELD RebootMode Flashd = 3
+  FIELD RebootMode Recovery = 2
+  FIELD Int32 value__
+TYPE struct HdcSharp.RunMode
+  PROP RunMode Tcp{ get; }
+  PROP RunMode TcpClose{ get; }
+  PROP RunMode Usb{ get; }
+  METHOD Boolean Equals(Object obj)
+  METHOD Boolean Equals(RunMode other)
+  METHOD Int32 GetHashCode()
+  METHOD RunMode TcpPort(Int32 port)
+  METHOD String ToString()
+TYPE enum HdcSharp.Security.AuthPhase
+  FIELD AuthPhase AuthFailed = 2
+  FIELD AuthPhase AuthOk = 1
+  FIELD AuthPhase AuthRequired = 0
+  FIELD AuthPhase BannerInvalid = 3
+  FIELD Int32 value__
+TYPE sealed class HdcSharp.Security.FileHostKeyStore
+  CTOR (String baseDir = null)
+  METHOD Void Dispose()
+  METHOD RSA GetPrivateKey()
+  METHOD String GetPublicKeyPem()
+TYPE interface HdcSharp.Security.IHostKeyStore
+  METHOD RSA GetPrivateKey()
+  METHOD String GetPublicKeyPem()
+TYPE sealed class HdcSharp.Security.RsaRaw
+  METHOD Byte[] Pkcs1PrivateEncrypt(RSA rsa, ReadOnlySpan<Byte> data)
+  METHOD Byte[] PssSign(RSA rsa, ReadOnlySpan<Byte> data)
+TYPE sealed class HdcSharp.ShellOptions
+  CTOR ()
+  PROP String BundleName{ get; init; }
+TYPE enum HdcSharp.Transport.AuthScheme
+  FIELD AuthScheme Pkcs1 = 2
+  FIELD AuthScheme PssSha512 = 1
+  FIELD AuthScheme Unknown = 0
+  FIELD Int32 value__
+TYPE sealed class HdcSharp.Transport.DaemonCapabilities
+  CTOR ()
+  PROP Boolean Authenticated{ get; set; }
+  PROP String DeviceName{ get; set; }
+  PROP String ErrorMessage{ get; set; }
+  PROP DaemonGeneration Generation{ get; set; }
+  PROP Boolean Heartbeat{ get; set; }
+  PROP AuthScheme Scheme{ get; set; }
+TYPE enum HdcSharp.Transport.DaemonGeneration
+  FIELD DaemonGeneration Cpp = 2
+  FIELD DaemonGeneration Rust = 1
+  FIELD DaemonGeneration Unknown = 0
+  FIELD Int32 value__
+TYPE sealed class HdcSharp.Transport.HdcConnection
+  CTOR (TcpClient client, HdcConnectionOptions options = null)
+  PROP Boolean IsClosed{ get; }
+  PROP UInt32 SessionId{ get; }
+  EVENT Action<Frame> ChannelClosed
+  EVENT Action<Frame> FrameReceived
+  METHOD Task CloseChannelAsync(UInt32 channelId, CancellationToken ct = null)
+  METHOD ValueTask DisposeAsync()
+  METHOD Void RegisterChannel(UInt32 channelId)
+  METHOD Task RunAsync(CancellationToken ct)
+  METHOD Task SendAsync(UInt32 channelId, HdcCommand cmd, ReadOnlyMemory<Byte> payload, CancellationToken ct = null)
+  METHOD Void StartHeartbeat()
+  METHOD Void UnregisterChannel(UInt32 channelId)
+TYPE sealed class HdcSharp.Transport.HdcConnectionOptions
+  CTOR ()
+  PROP TimeSpan HeartbeatInterval{ get; init; }
+  PROP Action<HdcLogLevel, String> Logger{ get; init; }
+TYPE enum HdcSharp.Transport.HdcLogLevel
+  FIELD HdcLogLevel Debug = 0
+  FIELD HdcLogLevel Error = 3
+  FIELD HdcLogLevel Info = 1
+  FIELD HdcLogLevel Warn = 2
+  FIELD Int32 value__
+TYPE sealed class HdcSharp.UninstallOptions
+  CTOR ()
+  PROP Boolean KeepData{ get; set; }
+  PROP Boolean Shared{ get; set; }

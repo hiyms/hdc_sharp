@@ -5,12 +5,22 @@
     <IsAotCompatible>true</IsAotCompatible>
     <EnableAotAnalyzer>true</EnableAotAnalyzer>
     <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
-    <Version>0.1.0</Version>
+    <IsTrimmable>true</IsTrimmable>
+    <Version>0.1.0-preview</Version>
     <PackageId>HdcSharp</PackageId>
-    <Description>纯 C# 实现的 OpenHarmony HDC 宿主侧协议库（WiFi/TCP）。</Description>
+    <Authors>HdcSharp contributors</Authors>
+    <Description>纯 C# 实现的 OpenHarmony HDC 宿主侧协议库（WiFi/TCP）：连接与认证、shell（一次性/流式/交互）、文件与目录收发、应用安装卸载、端口转发、hilog/bugreport。无 CLI、不实现设备端 daemon、无反射依赖，支持 Native AOT 与裁剪。</Description>
+    <PackageTags>openharmony;harmonyos;hdc;hdc-sharp;device-connector;tcp;aot;trimming</PackageTags>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+    <IsPackable>true</IsPackable>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="System.IO.Pipelines" Version="8.0.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="HdcSharp.Tests" />
