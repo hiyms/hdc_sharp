@@ -196,3 +196,32 @@ cd D:/work/hdc_sharp && dotnet test tests/HdcSharp.Tests
 
 验证有效性：把客户端回退为"抢先发 `[1]`"后，`FileTransferTests` **3 个用例失败**（round-trip / 整除边界 / 通道清理）；修复版本 151/151 通过。
 另更新 `SendFile_EmptyFile_Succeeds` 断言为空文件**应发且仅发一个零长度 DATA 帧**。
+
+---
+
+## 7. 真机目录传输验证（Task 15b，同日追加）
+
+探针：`D:\work\hdc-probe\dir-probe.cs`
+
+本地树：`root.txt` + `sub/a.bin`(120KB) + `sub/deep/b.txt` + `sub/deep/deeper/c.bin`(5KB) + 空目录 `emptydir`（协议不承载目录，空目录无条目 → 未创建）。
+
+**发送**（`SendDirectoryAsync`，503ms，进度回调 6 次涉及 4 个文件）：
+
+```
+设备侧树：                      设备侧 sha256 校验：
+/data/local/tmp/dirprobe        root.txt              ✅
+/data/local/tmp/dirprobe/sub    sub/a.bin             ✅
+  .../sub/deep                 sub/deep/b.txt        ✅
+  .../sub/deep/deeper          sub/deep/deeper/c.bin ✅
+```
+
+**接收**（`ReceiveDirectoryAsync`）：4 个文件全部回收，sha256 与发送前一致 → **往返闭环一致**。
+
+**结论**：目录结构、相对路径、多文件推进、进度累计均正确；`optionalName` 语义（目标不存在时按上游语义剥首层目录名）与设备实际落盘位置吻合。
+
+### 顺带核实的上游事实（已写回 spec §4.7.3）
+
+- 目录传输**仅 1 次 `WAKEUP`**（任务创建时），每个文件走完整 `FILE_CHECK`→`DATA`→`FINISH` 循环
+- `FILE_FINISH` 多文件语义：每个文件由**写端→主端**发一个 `[1]`；主端收 `[1]` 时若有下一文件则推进（**不发 `[0]`**），仅最后一个文件把 `1` 递减为 `[0]` 回发一次
+- `FILE_MODE(3006)`/`DIR_MODE(3007)` 仅在 `-m` 模式同步时使用（一期不实现）；`functionName` 在文件/目录传输中恒为空串（仅应用安装为 `"install"`）
+- 空目录不产生任何条目，上游 CLI 对空源目录直接报错；本库选择直返成功（不发明帧）
