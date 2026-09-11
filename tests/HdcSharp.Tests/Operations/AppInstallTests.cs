@@ -60,9 +60,13 @@ public class AppInstallTests : IDisposable
         string output = await WithTimeoutAsync(device.InstallAsync(hap), TestBudget);
 
         Assert.Equal("install success", output);
-        // 终结帧 CHANNEL_CLOSE 的到达是异步的（daemon 收到 CLOSE[0] 不回执，daemon.cpp:1251-1257），须等其被记录
+        // 终结帧 CHANNEL_CLOSE 的到达是异步的（daemon 收到 CLOSE[0] 不回执，daemon.cpp:1251-1257）；
+        // 握手也在 0 号通道上产生 CLOSE，故须按应用通道等宿主回发的 CLOSE[0]
+        uint channelId = Assert.Single(daemon.ReceivedFrames, f => f.Command == HdcCommand.AppCheck).ChannelId;
         await WaitForAsync(
-            () => daemon.ReceivedFrames.Any(f => f.Command == HdcCommand.KernelChannelClose), TestBudget);
+            () => daemon.ReceivedFrames.Any(f => f.ChannelId == channelId
+                && f.Command == HdcCommand.KernelChannelClose
+                && f.Payload.SequenceEqual(new byte[] { 0 })), TestBudget);
         Frame[] appFrames = daemon.ReceivedFrames.Where(f => f.ChannelId != 0).ToArray();
         Assert.Equal(HdcCommand.KernelWakeupSlavetask, appFrames[0].Command);
         Assert.Empty(appFrames[0].Payload);
@@ -180,9 +184,12 @@ public class AppInstallTests : IDisposable
         Assert.Equal("uninstall success", output);
         Frame request = Assert.Single(daemon.ReceivedFrames, f => f.Command == HdcCommand.AppUninstall);
         Assert.Equal("com.example.demo", Encoding.UTF8.GetString(request.Payload));
-        // 终结帧 CHANNEL_CLOSE 的到达是异步的（daemon 收到 CLOSE[0] 不回执，daemon.cpp:1251-1257），须等其被记录
+        // 终结帧 CHANNEL_CLOSE 的到达是异步的（daemon 收到 CLOSE[0] 不回执，daemon.cpp:1251-1257）；
+        // 握手也在 0 号通道上产生 CLOSE，故须按应用通道等宿主回发的 CLOSE[0]
         await WaitForAsync(
-            () => daemon.ReceivedFrames.Any(f => f.Command == HdcCommand.KernelChannelClose), TestBudget);
+            () => daemon.ReceivedFrames.Any(f => f.ChannelId == request.ChannelId
+                && f.Command == HdcCommand.KernelChannelClose
+                && f.Payload.SequenceEqual(new byte[] { 0 })), TestBudget);
         Assert.Equal(HdcCommand.KernelChannelClose, daemon.ReceivedFrames[^1].Command);
         // 上游 host 对卸载不发 WAKEUP/APP_CHECK/APP_INIT，也不传包数据
         Assert.DoesNotContain(

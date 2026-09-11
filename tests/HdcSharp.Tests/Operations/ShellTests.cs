@@ -157,6 +157,8 @@ public class ShellTests
         await using var host = new HdcHost();
         HdcDevice device = await ConnectAsync(host, daemon);
         IInteractiveShell shell = await WithTimeoutAsync(device.OpenInteractiveShellAsync(), TestBudget);
+        // SHELL_INIT 的到达是异步的（宿主发送完成 ≠ 替身已读到），须等其被记录后再断言
+        await WaitForAsync(() => daemon.ReceivedFrames.Any(f => f.Command == HdcCommand.ShellInit), TestBudget);
         string initPayload = Encoding.UTF8.GetString(
             Assert.Single(daemon.ReceivedFrames, f => f.Command == HdcCommand.ShellInit).Payload);
         try
@@ -184,6 +186,8 @@ public class ShellTests
         await using var host = new HdcHost();
         HdcDevice device = await ConnectAsync(host, daemon);
         IInteractiveShell shell = await WithTimeoutAsync(device.OpenInteractiveShellAsync(), TestBudget);
+        // SHELL_INIT 的到达是异步的（宿主发送完成 ≠ 替身已读到），须等其被记录后再断言
+        await WaitForAsync(() => daemon.ReceivedFrames.Any(f => f.Command == HdcCommand.ShellInit), TestBudget);
         uint channelId = Assert.Single(daemon.ReceivedFrames, f => f.Command == HdcCommand.ShellInit).ChannelId;
 
         await shell.DisposeAsync();
