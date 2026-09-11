@@ -5,3 +5,5 @@ obj/
 artifacts/
 *.binlog
 .ralph/
+# docfx 生成的 API 元数据与站点
+api/

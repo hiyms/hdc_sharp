@@ -6,6 +6,7 @@
 #   5) scripts/check-public-api.ps1                   → 公共 API 与 spec §5 冻结基线一致
 #   6) scripts/check-comments.ps1                     → 注释三分法粗筛
 #   7) scripts/check-readme-snippets.ps1              → README 代码块编译校验（防文档漂移）
+#   8) scripts/build-docs.ps1                         → docfx 文档站点生成（0 警告 + 产物校验）
 # 用法：pwsh -File scripts/verify-all.ps1
 [CmdletBinding()]
 param()
@@ -38,17 +39,17 @@ try {
         $results.Add([pscustomobject]@{ 步骤 = $Name; 结果 = if ($ok) { 'PASS' } else { 'FAIL' } })
     }
 
-    Invoke-Step '1/7 构建 HdcSharp.sln（Release）' {
+    Invoke-Step '1/8 构建 HdcSharp.sln（Release）' {
         dotnet build HdcSharp.sln -c Release
         if ($LASTEXITCODE -ne 0) { throw "构建失败（退出码 $LASTEXITCODE）" }
     }
 
-    Invoke-Step '2/7 测试 tests/HdcSharp.Tests（Release）' {
+    Invoke-Step '2/8 测试 tests/HdcSharp.Tests（Release）' {
         dotnet test tests/HdcSharp.Tests -c Release
         if ($LASTEXITCODE -ne 0) { throw "测试失败（退出码 $LASTEXITCODE）" }
     }
 
-    Invoke-Step '3/7 AOT 门禁：publish samples/AotConsumer（win-x64）' {
+    Invoke-Step '3/8 AOT 门禁：publish samples/AotConsumer（win-x64）' {
         dotnet publish samples/AotConsumer -r win-x64 -c Release
         if ($LASTEXITCODE -ne 0) { throw "AOT 发布失败（退出码 $LASTEXITCODE）" }
 
@@ -59,24 +60,29 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "AOT 产物 --help 冒烟失败（退出码 $LASTEXITCODE）" }
     }
 
-    Invoke-Step '4/7 打包 src/HdcSharp（Release）' {
+    Invoke-Step '4/8 打包 src/HdcSharp（Release）' {
         dotnet pack src/HdcSharp -c Release
         if ($LASTEXITCODE -ne 0) { throw "打包失败（退出码 $LASTEXITCODE）" }
     }
 
-    Invoke-Step '5/7 公共 API 冻结基线比对' {
+    Invoke-Step '5/8 公共 API 冻结基线比对' {
         pwsh -NoProfile -File scripts/check-public-api.ps1
         if ($LASTEXITCODE -ne 0) { throw "公共 API 与冻结基线不一致（退出码 $LASTEXITCODE）" }
     }
 
-    Invoke-Step '6/7 注释三分法粗筛' {
+    Invoke-Step '6/8 注释三分法粗筛' {
         pwsh -NoProfile -File scripts/check-comments.ps1 | Select-Object -Last 1 | Write-Host
         if ($LASTEXITCODE -ne 0) { throw "注释三分法检查失败（退出码 $LASTEXITCODE）" }
     }
 
-    Invoke-Step '7/7 README 代码块编译校验' {
+    Invoke-Step '7/8 README 代码块编译校验' {
         pwsh -NoProfile -File scripts/check-readme-snippets.ps1 | Select-Object -Last 1 | Write-Host
         if ($LASTEXITCODE -ne 0) { throw "README 代码块编译失败（退出码 $LASTEXITCODE）" }
+    }
+
+    Invoke-Step '8/8 docfx 文档站点生成' {
+        pwsh -NoProfile -File scripts/build-docs.ps1 | Select-Object -Last 1 | Write-Host
+        if ($LASTEXITCODE -ne 0) { throw "docfx 文档生成失败（退出码 $LASTEXITCODE）" }
     }
 
     Write-Host ''

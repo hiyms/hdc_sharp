@@ -37,7 +37,7 @@
 
 ## 快速开始
 
-完整可运行版本见 [`samples/AotConsumer/`](samples/AotConsumer/)（连接 → shell → 文件往返 sha256 比对，无参数或 `--help` 时优雅退出，不硬编码任何真机地址）。
+完整可运行版本见 `samples/AotConsumer/`（`Program.cs` + `AotConsumer.csproj`）：连接 → shell → 文件往返 sha256 比对，无参数或 `--help` 时优雅退出，不硬编码任何真机地址。
 
 下面的片段会被 `scripts/check-readme-snippets.ps1` 抽取并真实编译，文档不会与公共 API 漂移：
 
@@ -119,7 +119,7 @@ dotnet publish samples/AotConsumer -r win-x64 -c Release
 # 1) 构建（0 警告 0 错误）
 dotnet build HdcSharp.sln -c Release
 
-# 2) 单元/回环测试：通过 210、跳过 25（真机用例）、总计 235
+# 2) 单元/回环测试：通过 211、跳过 26（真机用例）、总计 237
 dotnet test tests/HdcSharp.Tests -c Release
 
 # 3) AOT 编译门禁（消费端样例）
@@ -129,7 +129,7 @@ dotnet publish samples/AotConsumer -r win-x64 -c Release
 dotnet pack src/HdcSharp -c Release
 ```
 
-`scripts/verify-all.ps1` 按顺序执行以上四条 + 三条质量门禁（公共 API 基线、注释三分法、README 代码块编译）并汇总结果，**这是本仓库唯一需要复跑的验收命令**：
+`scripts/verify-all.ps1` 按顺序执行以上四条 + 四条质量门禁（公共 API 基线、注释三分法、README 代码块编译、docfx 文档生成）并汇总结果，**这是本仓库唯一需要复跑的验收命令**：
 
 ```powershell
 pwsh -File scripts/verify-all.ps1
@@ -144,9 +144,13 @@ dotnet test tests/HdcSharp.Tests -c Release --filter 'RealDevice=true'
 
 # 方式二：带挂起保护的脚本
 pwsh -File scripts/run-realdevice-tests.ps1 -Target 192.168.2.161:44221
+
+# 需真实签名包的用例（安装/卸载闭环）另需指向本地 .hap，否则单独跳过
+$env:HDC_TEST_HAP = '<本地 entry-default-signed.hap 路径>'
+dotnet test tests/HdcSharp.Tests -c Release --filter 'RealDevice=true'
 ```
 
-真机用例覆盖：连接/认证/世代指纹、shell 一次性与流式（含多字节 UTF-8、stderr 合并、退出码不上线）、交互式 shell、TLV32 沙箱、文件双向传输与 R1 边界尺寸、目录嵌套往返、安装/卸载路径、fport/rport、hilog/bugreport 只读流。真机路径共 25 个测试方法（其中 2 个为 8 行数据驱动的边界尺寸用例，展开后 39 个用例结果），已在 `192.168.2.161:44221` 亲验 39/39 通过；默认未设 `HDC_TEST_TARGET` 时它们整体跳过（显示为 25 个跳过项）。
+真机用例覆盖：连接/认证/世代指纹、shell 一次性与流式（含多字节 UTF-8、stderr 合并、退出码不上线）、交互式 shell、TLV32 沙箱、文件双向传输与 R1 边界尺寸、目录嵌套往返、安装/卸载路径、fport/rport、hilog/bugreport 只读流。真机路径共 26 个测试方法（其中 2 个为 8 行数据驱动的边界尺寸用例，展开后 40 个用例结果），已在 `192.168.2.161:44221` 亲验 **40/40 通过**（提供 `HDC_TEST_HAP` 时；否则为 39 通过 + 1 跳过）；默认未设 `HDC_TEST_TARGET` 时它们整体跳过（显示为 26 个跳过项）。
 
 其余质量门禁：
 
@@ -162,7 +166,31 @@ pwsh -File scripts/check-comments.ps1
 
 # README 代码块编译校验（防文档示例与公共 API 漂移）
 pwsh -File scripts/check-readme-snippets.ps1
+
+# docfx 文档站点生成（0 警告 + 产物校验）
+pwsh -File scripts/build-docs.ps1
 ```
+
+## 生成 API 文档（docfx）
+
+API 文档直接由源码中的中文 XML 文档注释生成，**不存在手写的 API 副本**，因此不会漂移。站点同时纳入设计规格、实施计划、真机验证记录与真机测试套件说明。
+
+```powershell
+# 生成本地站点 → artifacts/docs（内部会先 dotnet tool restore）
+pwsh -File scripts/build-docs.ps1
+
+# 本地预览（默认 http://localhost:8080）
+pwsh -File scripts/build-docs.ps1 -Serve
+
+# 干净重建（先删 api/ 与 artifacts/docs/）
+pwsh -File scripts/build-docs.ps1 -Clean
+```
+
+- 配置：`docfx.json`（元数据源 `src/HdcSharp/HdcSharp.csproj`，模板 `default` + `default(zh-cn)` 中文 UI）
+- 导航：`toc.yml`（站点）+ `docs/toc.yml`（设计文档子目录）+ `index.md`（站点首页）
+- 产物：`api/*.yml`（API 元数据）与 `artifacts/docs/`（HTML 站点），二者均已 gitignore，由脚本随时重建
+- docfx 以本地工具固定版本（`dotnet-tools.json`）：首次在干净机器上需网络还原 NuGet 包，之后离线可构建
+- 门禁：`scripts/build-docs.ps1` 会校验首页/API 目录/搜索索引存在，且 API 页数量不少于公共类型数；docfx 产生任何警告都会让 `verify-all.ps1` 的第 8 项失败
 
 ## 已知限制与未覆盖项
 

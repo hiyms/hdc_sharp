@@ -1,0 +1,8 @@
+- name: 设计规格（协议/架构/API 冻结基线）
+  href: superpowers/specs/2026-09-09-hdcsharp-design.md
+- name: 实施计划（20 任务 TDD）
+  href: superpowers/plans/2026-09-09-hdcsharp-implementation.md
+- name: 真机验证记录（C++ 世代实测）
+  href: verification/2026-09-11-real-device-connect.md
+- name: 真机测试套件说明（如何启用/覆盖矩阵）
+  href: ../tests/HdcSharp.Tests/RealDevice/README.md

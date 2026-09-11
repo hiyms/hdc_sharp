@@ -1,0 +1,65 @@
+{
+  "$schema": "https://raw.githubusercontent.com/dotnet/docfx/main/schemas/docfx.schema.json",
+  "metadata": [
+    {
+      "src": [
+        {
+          "src": "src/HdcSharp",
+          "files": [ "HdcSharp.csproj" ]
+        }
+      ],
+      "dest": "api",
+      "namespaceLayout": "nested",
+      "disableGitFeatures": true,
+      "disableDefaultFilter": false,
+      "references": []
+    }
+  ],
+  "build": {
+    "content": [
+      {
+        "files": [ "api/*.yml" ]
+      },
+      {
+        "files": [ "index.md", "README.md", "toc.yml" ]
+      },
+      {
+        "files": [ "docs/**/*.md", "docs/toc.yml" ],
+        "exclude": [ "**/bin/**", "**/obj/**" ]
+      },
+      {
+        "files": [ "tests/**/README.md" ],
+        "exclude": [ "**/bin/**", "**/obj/**" ]
+      }
+    ],
+    "resource": [
+      {
+        "files": [ "**/*.png", "**/*.jpg", "**/*.jpeg", "**/*.gif", "**/*.svg" ],
+        "exclude": [ "artifacts/**", "**/bin/**", "**/obj/**", "**/.git/**" ]
+      }
+    ],
+    "dest": "artifacts/docs",
+    "template": [ "default", "default(zh-cn)" ],
+    "markdownEngineName": "markdig",
+    "noLangKeyword": false,
+    "keepFileLink": false,
+    "cleanupCacheHistory": false,
+    "disableGitFeatures": true,
+    "globalMetadata": {
+      "_appName": "HdcSharp",
+      "_appTitle": "HdcSharp — OpenHarmony HDC 宿主侧协议库（纯 C#）",
+      "_appFooter": "HdcSharp · Apache-2.0 · 本站由 docfx 生成，内容源自源码中文 XML 文档注释",
+      "_enableSearch": true,
+      "_disableContribution": true,
+      "_disableAffix": false,
+      "_lang": "zh-CN"
+    },
+    "fileMetadata": {},
+    "xref": [],
+    "xrefmap": [],
+    "serve": {
+      "host": "localhost",
+      "port": 8080
+    }
+  }
+}
