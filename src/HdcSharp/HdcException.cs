@@ -1,4 +1,4 @@
-namespace HdcSharp.Protocol;
+namespace HdcSharp;
 
 /// <summary>
 /// HDC 操作结果级别，与 KERNEL_ECHO 的 level 字节语义对齐。

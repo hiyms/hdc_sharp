@@ -59,6 +59,10 @@ TYPE enum HdcSharp.HdcDeviceState
   FIELD HdcDeviceState Offline = 3
   FIELD HdcDeviceState Online = 2
   FIELD Int32 value__
+TYPE sealed class HdcSharp.HdcException
+  CTOR (String message, String errorCode = null, MessageLevel level = Fail)
+  PROP String ErrorCode{ get; }
+  PROP MessageLevel Level{ get; }
 TYPE sealed class HdcSharp.HdcHost
   CTOR ()
   PROP IReadOnlyList<HdcDevice> ConnectedDevices{ get; }
@@ -84,6 +88,11 @@ TYPE sealed class HdcSharp.InstallOptions
   PROP Boolean GrantPermissions{ get; set; }
   PROP Boolean Replace{ get; set; }
   PROP Boolean Shared{ get; set; }
+TYPE enum HdcSharp.MessageLevel
+  FIELD MessageLevel Fail = 0
+  FIELD MessageLevel Info = 1
+  FIELD MessageLevel Ok = 2
+  FIELD Int32 value__
 TYPE struct HdcSharp.Protocol.Frame
   CTOR (UInt32 ChannelId, HdcCommand Command, Byte[] Payload)
   PROP UInt32 ChannelId{ get; init; }
@@ -164,15 +173,6 @@ TYPE sealed class HdcSharp.Protocol.HdcConstants
   FIELD String TlvShellOpt = 1200
   FIELD String TlvSupportFeatures = supportfeatures
   FIELD Int32 TransferSlotSize = 64
-TYPE sealed class HdcSharp.Protocol.HdcException
-  CTOR (String message, String errorCode = null, MessageLevel level = Fail)
-  PROP String ErrorCode{ get; }
-  PROP MessageLevel Level{ get; }
-TYPE enum HdcSharp.Protocol.MessageLevel
-  FIELD MessageLevel Fail = 0
-  FIELD MessageLevel Info = 1
-  FIELD MessageLevel Ok = 2
-  FIELD Int32 value__
 TYPE sealed class HdcSharp.Protocol.SerialStruct.SerialReader
   CTOR (ReadOnlySpan<Byte> data)
   PROP Int32 Field{ get; set; }

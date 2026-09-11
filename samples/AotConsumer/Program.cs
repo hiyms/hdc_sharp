@@ -9,7 +9,6 @@
 using System.Security.Cryptography;
 using System.Text;
 using HdcSharp;
-using HdcSharp.Protocol;
 
 if (args.Length == 0 || args[0] is "--help" or "-h")
 {

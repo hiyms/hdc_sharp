@@ -347,6 +347,7 @@ public sealed class HdcDevice
     public Task<string> ExecuteShellAsync(string command, CancellationToken ct = default);
     public IAsyncEnumerable<byte[]> StreamShellOutputAsync(string command, CancellationToken ct = default);
     public Task<IInteractiveShell> OpenInteractiveShellAsync(CancellationToken ct = default);
+    public Task<string> ExecuteUnityAsync(string command, ShellOptions? options = null, CancellationToken ct = default);
     public Task SendFileAsync(string localPath, string remotePath, IProgress<FileProgress>? progress = null, CancellationToken ct = default);
     public Task ReceiveFileAsync(string remotePath, string localPath, IProgress<FileProgress>? progress = null, CancellationToken ct = default);
     public Task SendDirectoryAsync(string localDir, string remoteDir, IProgress<FileProgress>? progress = null, CancellationToken ct = default);
@@ -385,7 +386,20 @@ public sealed class DeviceDisconnectedEventArgs : EventArgs
 }
 ```
 
-其余支撑类型（`FileProgress{BytesTransferred,TotalBytes,FileName}`、`InstallOptions{Replace,Downgrade,Shared,...}`、`RebootMode`、`RunMode`、`HdcException{ErrorCode,Message,Level}`、`DaemonGeneration{Rust,Cpp,Unknown}`、`HdcDeviceState{Connecting,Authorizing,Online,Offline}`）随实现细化，但**公共签名以本节为冻结基线**。
+其余支撑类型（`FileProgress{BytesTransferred,TotalBytes,FileName}`、`InstallOptions`、`UninstallOptions`、`RebootMode`、`RunMode`、`HdcException{ErrorCode,Message,Level}`、`MessageLevel`、`DaemonGeneration{Rust,Cpp,Unknown}`、`HdcDeviceState{Connecting,Authorizing,Online,Offline}`、`ShellOptions`）随实现细化，但**公共签名以本节为冻结基线**。
+
+**低层公共 API（高级用法，不属冻结基线）**：库同时公开协议原语与传输层，便于消费端自行驱动或扩展：
+
+| 命名空间 | 公共类型 |
+|---|---|
+| `HdcSharp`（根） | `HdcException`、`MessageLevel`、`HdcDeviceState`、`DaemonGeneration`（经 `HdcDevice.Generation` 暴露） |
+| `HdcSharp.Protocol` | `HdcCommand`、`HdcConstants`、`Frame`、`FrameCodec`、`FrameDecoder`、`Tlv16`、`Tlv32` |
+| `HdcSharp.Protocol.SerialStruct` | `SerialReader`、`SerialWriter`、`WireType` |
+| `HdcSharp.Protocol.Tar` | `TarHeader`、`TarHeaderInfo`、`TarEntryType`、`TarReader`、`TarWriter` |
+| `HdcSharp.Transport` | `HdcConnection`、`HdcConnectionOptions`、`HdcLogLevel`、`DaemonCapabilities`、`AuthScheme` |
+| `HdcSharp.Security` | `IHostKeyStore`、`FileHostKeyStore`、`RsaRaw`、`AuthPhase` |
+
+`HdcException` 与 `MessageLevel` 位于**根命名空间 `HdcSharp`**（消费方 catch 无需额外 using；实测已确认）。
 
 ## 6. 错误处理与取消
 
