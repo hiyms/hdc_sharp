@@ -215,4 +215,49 @@ public sealed class HdcDevice
         ArgumentException.ThrowIfNullOrEmpty(localPath);
         return FileOperation.ReceiveAsync(this, remotePath, localPath, progress, ct);
     }
+
+    /// <summary>
+    /// 递归发送本地目录到设备（spec §4.7.3）：一次性枚举后逐文件沿单文件线缆流程推进，
+    /// 整次传输共用一个通道、只发一次 WAKEUP_SLAVETASK；每个文件的 optionalName 为「源目录名/相对路径」
+    /// （'/' 分隔，对齐上游 transfer.cpp:717），daemon 端自动逐级建目录。
+    /// 空目录（或仅含空子目录）不产生任何线上帧并成功返回——协议只承载文件（上游 CLI 在同场景报错）。
+    /// 符号链接（目录与文件）跳过，避免目录环与重复内容。
+    /// </summary>
+    /// <param name="localDir">本地源目录；不存在时抛出。</param>
+    /// <param name="remoteDir">设备端目标路径：为已存在目录时在其下创建「源目录名」子树；不存在时该路径即重命名后的源目录（daemon 端语义）。</param>
+    /// <param name="progress">进度回调，每发送一个数据块（≤48KiB）调用一次；<see cref="FileProgress.BytesTransferred"/> 跨文件累计，
+    /// <see cref="FileProgress.FileName"/> 为相对源目录的路径（'/' 分隔），<see cref="FileProgress.TotalBytes"/> 为整目录字节数。</param>
+    /// <param name="ct">取消令牌；取消时发送 CHANNEL_CLOSE[0] 并清理通道（已传输的部分文件留在设备端）。</param>
+    /// <returns>传输完成的任务；daemon 报错时以 <see cref="HdcException"/> 结束。</returns>
+    /// <exception cref="ArgumentException">路径为空，或 <paramref name="localDir"/> 为目录根（无法形成相对路径）。</exception>
+    /// <exception cref="DirectoryNotFoundException">本地源目录不存在。</exception>
+    /// <exception cref="HdcException">daemon 拒绝、连接断开或协议字段非法。</exception>
+    public Task SendDirectoryAsync(
+        string localDir, string remoteDir, IProgress<FileProgress>? progress = null, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(localDir);
+        ArgumentException.ThrowIfNullOrEmpty(remoteDir);
+        return FileOperation.SendDirectoryAsync(this, localDir, remoteDir, progress, ct);
+    }
+
+    /// <summary>
+    /// 从设备接收目录（spec §4.7.3）：daemon 作为主端递归枚举并逐文件推送 FILE_CHECK，
+    /// 本库按 daemon 给出的 optionalName 重建目录树。本地目标已存在时保留 daemon 的顶层目录名；
+    /// 不存在时创建该路径并剥掉首层（对齐上游 daemon 落盘语义，transfer.cpp:768-812、857-873）。
+    /// </summary>
+    /// <param name="remoteDir">设备端源目录。</param>
+    /// <param name="localDir">本地目标根；父目录不存在时逐级创建。</param>
+    /// <param name="progress">进度回调，每收到一个数据块调用一次；<see cref="FileProgress.BytesTransferred"/> 跨文件累计，
+    /// <see cref="FileProgress.FileName"/> 为 daemon 提供的相对路径，<see cref="FileProgress.TotalBytes"/> 为已发现文件大小累计（结束时等于总字节数）。</param>
+    /// <param name="ct">取消令牌；取消时发送 CHANNEL_CLOSE[0] 并清理通道。</param>
+    /// <returns>传输完成的任务；设备端目录不存在等 daemon 报错时以 <see cref="HdcException"/> 结束。</returns>
+    /// <exception cref="ArgumentException">路径为空。</exception>
+    /// <exception cref="HdcException">daemon 拒绝、连接断开、协议字段非法或本地目标已被同名文件占用。</exception>
+    public Task ReceiveDirectoryAsync(
+        string remoteDir, string localDir, IProgress<FileProgress>? progress = null, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(remoteDir);
+        ArgumentException.ThrowIfNullOrEmpty(localDir);
+        return FileOperation.ReceiveDirectoryAsync(this, remoteDir, localDir, progress, ct);
+    }
 }

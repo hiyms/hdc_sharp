@@ -63,6 +63,10 @@ public sealed class FakeDaemonOptions
 
     /// <summary>recv 剧本 FILE_CHECK 的 optionalName。</summary>
     public string FilePushName { get; set; } = "pushed.bin";
+
+    /// <summary>recv 方向目录剧本：非 null 时按序逐文件推 FILE_CHECK/DATA（optionalName 即相对路径），
+    /// 宿主每文件回 FILE_FINISH[1] 后推进下一文件，队列耗尽回 FILE_FINISH[0]（上游 file.cpp:645-668）。</summary>
+    public IReadOnlyList<(string Name, byte[] Content)>? FilePushFiles { get; set; }
 }
 
 /// <summary>
@@ -119,6 +123,20 @@ public sealed class FakeDaemon : IDisposable
 
         /// <summary>已真正落盘的字节数（真机 daemon 的 indexIO）。</summary>
         public long Written { get; set; }
+
+        /// <summary>本通道累计接收字节与文件数（供收尾 ECHO 汇总文本）。</summary>
+        public long TotalReceived { get; set; }
+
+        public int FilesReceived { get; set; }
+
+        /// <summary>push 目录剧本：待推文件序列、下一个待 CHECK 的下标、当前推的文件与宿主落盘目标。</summary>
+        public IReadOnlyList<(string Name, byte[] Content)>? PushFiles { get; set; }
+
+        public int PushIndex { get; set; }
+
+        public (string Name, byte[] Content) PushCurrent { get; set; }
+
+        public string PushPath { get; set; } = ".";
     }
 
     /// <summary>在回环随机端口上启动假 daemon，并立即开始接受连接。</summary>
@@ -405,8 +423,8 @@ public sealed class FakeDaemon : IDisposable
         {
             case HdcCommand.KernelWakeupSlavetask:
                 return _options.FileRecvSinkDirectory is not null || _options.FilePushData is not null;
-            case HdcCommand.FileInit when _options.FilePushData is { } pushData:
-                return await HandleFileInitPushAsync(stream, frame, fileStates, pushData, ct);
+            case HdcCommand.FileInit when _options.FilePushData is not null || _options.FilePushFiles is not null:
+                return await HandleFileInitPushAsync(stream, frame, fileStates, ct);
             case HdcCommand.FileCheck when _options.FileRecvSinkDirectory is { } sinkDirectory:
                 return await HandleFileCheckAsync(stream, frame, fileStates, sinkDirectory, ct);
             case HdcCommand.FileBegin when fileStates.TryGetValue(frame.ChannelId, out FileTaskState? beginState) &&
@@ -418,7 +436,7 @@ public sealed class FakeDaemon : IDisposable
                 return true;
             case HdcCommand.FileFinish when fileStates.TryGetValue(frame.ChannelId, out FileTaskState? finishState) &&
                                             finishState.Kind == FileTaskKind.Push:
-                return await HandlePushFinishAsync(stream, frame, ct);
+                return await HandlePushFinishAsync(stream, frame, finishState, ct);
             case HdcCommand.FileFinish when fileStates.TryGetValue(frame.ChannelId, out FileTaskState? sinkState) &&
                                             sinkState.Kind == FileTaskKind.Sink:
                 return await HandleSinkFinishAsync(stream, frame, sinkState, ct);
@@ -428,20 +446,37 @@ public sealed class FakeDaemon : IDisposable
     }
 
     private async Task<bool> HandleFileInitPushAsync(
-        NetworkStream stream, Frame frame, Dictionary<uint, FileTaskState> fileStates, byte[] pushData, CancellationToken ct)
+        NetworkStream stream, Frame frame, Dictionary<uint, FileTaskState> fileStates, CancellationToken ct)
     {
+        IReadOnlyList<(string Name, byte[] Content)> files = _options.FilePushFiles is { Count: > 0 } directory
+            ? directory
+            : [(_options.FilePushName, _options.FilePushData ?? [])];
         string[] tokens = Encoding.UTF8.GetString(frame.Payload).Split(' ', StringSplitOptions.RemoveEmptyEntries);
         string localPath = tokens.Length > 1 ? tokens[1] : ".";
+        var state = new FileTaskState
+        {
+            Kind = FileTaskKind.Push,
+            PushPending = true,
+            PushFiles = files,
+            PushIndex = 1,
+            PushCurrent = files[0],
+            PushPath = localPath,
+        };
+        fileStates[frame.ChannelId] = state;
+        await SendFrameAsync(stream, frame.ChannelId, HdcCommand.KernelWakeupSlavetask, [], ct);
+        await SendPushCheckAsync(stream, frame.ChannelId, state, ct);
+        return true;
+    }
+
+    private static Task SendPushCheckAsync(NetworkStream stream, uint channelId, FileTaskState state, CancellationToken ct)
+    {
         var config = new TransferConfig
         {
-            FileSize = (ulong)pushData.Length,
-            Path = localPath,
-            OptionalName = _options.FilePushName,
+            FileSize = (ulong)state.PushCurrent.Content.Length,
+            Path = state.PushPath,
+            OptionalName = state.PushCurrent.Name,
         };
-        fileStates[frame.ChannelId] = new FileTaskState { Kind = FileTaskKind.Push, PushPending = true };
-        await SendFrameAsync(stream, frame.ChannelId, HdcCommand.KernelWakeupSlavetask, [], ct);
-        await SendFrameAsync(stream, frame.ChannelId, HdcCommand.FileCheck, config.Serialize(), ct);
-        return true;
+        return SendFrameAsync(stream, channelId, HdcCommand.FileCheck, config.Serialize(), ct);
     }
 
     private async Task<bool> HandleFileCheckAsync(
@@ -449,18 +484,64 @@ public sealed class FakeDaemon : IDisposable
     {
         TransferConfig config = TransferConfig.Parse(frame.Payload);
         Directory.CreateDirectory(sinkDirectory);
-        string name = config.Path.EndsWith('/') || config.Path.EndsWith('\\')
-            ? config.OptionalName
-            : Path.GetFileName(config.Path);
-        string target = Path.Combine(sinkDirectory, name);
+        long totalReceived = 0;
+        int filesReceived = 0;
+        if (fileStates.TryGetValue(frame.ChannelId, out FileTaskState? previous))
+        {
+            // 目录模式同一通道的下一个 CHECK：真机 daemon 在前一文件收尾时 CloseCtxFd；此处关闭上一文件流
+            CloseSink(previous);
+            totalReceived = previous.TotalReceived;
+            filesReceived = previous.FilesReceived;
+        }
+
+        string relative = ResolveSinkRelativePath(config);
+        string target = Path.Combine(sinkDirectory, NormalizeSeparators(relative));
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(target))!);
         fileStates[frame.ChannelId] = new FileTaskState
         {
             Kind = FileTaskKind.Sink,
             Sink = new FileStream(target, System.IO.FileMode.Create, FileAccess.Write, FileShare.Read),
             FileSize = (long)config.FileSize,
+            TotalReceived = totalReceived,
+            FilesReceived = filesReceived + 1,
         };
         await SendFrameAsync(stream, frame.ChannelId, HdcCommand.FileBegin, _options.FileBeginPayload ?? [], ct);
         return true;
+    }
+
+    /// <summary>
+    /// 按上游 daemon 的落盘路径拼接建模 optionalName（transfer.cpp:857-873 SmartSlavePath、801-855 CheckFilename）：
+    /// optionalName 无分隔符 = 单文件（既有剧本）；含分隔符 = 目录模式——远端路径以分隔符结尾视为「已存在目录」
+    /// 保留全路径，否则视为「目标不存在」丢弃首层（真机 daemon 的 targetDirNotExist 语义）。
+    /// </summary>
+    private static string ResolveSinkRelativePath(TransferConfig config)
+    {
+        string optionalName = config.OptionalName;
+        if (optionalName.Length == 0)
+        {
+            return Path.GetFileName(config.Path);
+        }
+
+        bool directoryMode = optionalName.Contains('/') || optionalName.Contains('\\');
+        if (!directoryMode)
+        {
+            return config.Path.EndsWith('/') || config.Path.EndsWith('\\')
+                ? optionalName
+                : Path.GetFileName(config.Path);
+        }
+
+        if (config.Path.EndsWith('/') || config.Path.EndsWith('\\'))
+        {
+            return optionalName;
+        }
+
+        int separator = optionalName.IndexOfAny(['/', '\\']);
+        return separator >= 0 && separator + 1 < optionalName.Length ? optionalName[(separator + 1)..] : optionalName;
+    }
+
+    private static string NormalizeSeparators(string relative)
+    {
+        return relative.Replace('/', Path.DirectorySeparatorChar).Replace('\\', Path.DirectorySeparatorChar);
     }
 
     private async Task WriteSinkDataAsync(NetworkStream stream, Frame frame, FileTaskState state, CancellationToken ct)
@@ -482,6 +563,7 @@ public sealed class FakeDaemon : IDisposable
         FlushPending(state);
         state.Pending = ((long)head.Index, frame.Payload[HdcConstants.TransferSlotSize..(HdcConstants.TransferSlotSize + size)]);
         state.Received += size;
+        state.TotalReceived += size;
         state.PendingFlush = CompletePendingAfterDelayAsync(stream, frame.ChannelId, state);
     }
 
@@ -534,7 +616,7 @@ public sealed class FakeDaemon : IDisposable
         FlushPending(state);
         CloseSink(state);
         byte[] text = Encoding.UTF8.GetBytes(
-            $"FileTransfer finish, Size:{state.Received}, File count = 1, time:0ms rate:0.00kB/s");
+            $"FileTransfer finish, Size:{state.TotalReceived}, File count = {state.FilesReceived}, time:0ms rate:0.00kB/s");
         byte[] echo = new byte[text.Length + 1];
         echo[0] = (byte)MessageLevel.Ok;
         text.CopyTo(echo, 1);
@@ -551,10 +633,10 @@ public sealed class FakeDaemon : IDisposable
         state.Sink = null;
     }
 
-    private async Task<bool> PushFileDataAsync(NetworkStream stream, uint channelId, FileTaskState state, CancellationToken ct)
+    private static async Task<bool> PushFileDataAsync(NetworkStream stream, uint channelId, FileTaskState state, CancellationToken ct)
     {
         state.PushPending = false;
-        byte[] data = _options.FilePushData ?? [];
+        byte[] data = state.PushCurrent.Content;
         int offset = 0;
         do
         {
@@ -578,13 +660,25 @@ public sealed class FakeDaemon : IDisposable
         return true;
     }
 
-    private static async Task<bool> HandlePushFinishAsync(NetworkStream stream, Frame frame, CancellationToken ct)
+    private static async Task<bool> HandlePushFinishAsync(
+        NetworkStream stream, Frame frame, FileTaskState state, CancellationToken ct)
     {
-        if (frame.Payload.Length > 0 && frame.Payload[0] == 1)
+        if (frame.Payload.Length == 0 || frame.Payload[0] != 1)
         {
-            await SendFrameAsync(stream, frame.ChannelId, HdcCommand.FileFinish, [0], ct);
+            return true;
         }
 
+        if (state.PushFiles is { } files && state.PushIndex < files.Count)
+        {
+            // 上游主端收写端 [1] 后推进下一文件（file.cpp:651-653 TransferNext→CheckMaster），不先回 [0]
+            state.PushCurrent = files[state.PushIndex];
+            state.PushIndex++;
+            state.PushPending = true;
+            await SendPushCheckAsync(stream, frame.ChannelId, state, ct);
+            return true;
+        }
+
+        await SendFrameAsync(stream, frame.ChannelId, HdcCommand.FileFinish, [0], ct);
         return true;
     }
 
@@ -701,6 +795,13 @@ public sealed class FakeDaemon : IDisposable
     public static FakeDaemon WithFilePush(byte[] content, string fileName)
     {
         return new FakeDaemon(new FakeDaemonOptions { FilePushData = content, FilePushName = fileName });
+    }
+
+    /// <summary>创建“收到 FILE_INIT 后按序推送多文件目录”的假 daemon（Rust 世代、免认证）。</summary>
+    /// <param name="files">optionalName（含相对路径）与内容的序列，按给定顺序推送。</param>
+    public static FakeDaemon WithFilePushDirectory(params (string Name, byte[] Content)[] files)
+    {
+        return new FakeDaemon(new FakeDaemonOptions { FilePushFiles = files });
     }
 
     private Task SendAuthOkAsync(NetworkStream stream, uint sessionId, CancellationToken ct)
