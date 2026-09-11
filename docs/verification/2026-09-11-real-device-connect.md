@@ -291,3 +291,39 @@ PASV
 
 **结论**：双向数据流完全正确（设备→主机与应用层往返均验证）；`DisposeAsync` 后 `IsActive=False`。
 `ReverseTcpAsync(0, …)` 会抛 `ArgumentOutOfRangeException`（设备侧监听端口必须显式指定，无"自动分配"语义）——符合设计预期。
+
+---
+
+## 10. 真机 Unity 命令验证（Task 18，同日追加；仅只读命令）
+
+探针：`D:\work\hdc-probe\unity-probe.cs`
+
+**未执行任何写操作命令**（reboot/remount/rootrun/runmode 全部跳过，避免改变设备状态）。
+
+### 10.1 hilog（`CMD_UNITY_HILOG=1005`，数据帧 `ECHO_RAW=10`）
+
+```
+09-02 09:31:23.375     0     0 I I00000/HiLog: ========Zeroth log of type: init
+09-02 09:31:23.243   550   550 I I02C01/hmos_cust_carrier_mount/CustCarrierMount: MountCarrierToShared start
+…（5 行后主动取消）
+```
+✅ 行流正确（UTF-8 按行切分）；✅ 取消后无异常（发 `CHANNEL_CLOSE[0]` 清理）；✅ 未破坏设备状态。
+
+### 10.2 bugreport（`CMD_UNITY_BUGREPORT_INIT=1011` / `_DATA=1012`）
+
+```
+收到 1331 块，累计 300323 字节
+开头片段：-p option only support debug application | -----[base]----- | BuildId: MRT-AL10 6.1.0.135(SP8C00E120R5P5) | RleaseType: Release | OsVe…
+```
+✅ 分块流正确，内容为设备真实 `hidumper` 输出；✅ 无 tar/zip 与压缩（与上游一致：打包压缩只存在于宿主 CLI 本地路径，不在线缆协议内）。
+
+### 10.3 顺带核实的上游事实（已回写 spec §4.10）
+
+| 项 | 实测/源码结论 |
+|---|---|
+| bugreport 命令号 | **1011/1012**（不是 2000——2000/2001 是 `SHELL_INIT/SHELL_DATA`） |
+| hilog 数据帧 | 恒为 `ECHO_RAW(10)`；**终结**另有 daemon 的 `CHANNEL_CLOSE[1]`（二者并存） |
+| reboot 模式 | 白名单三个：`bootloader`/`recovery`/`flashd`（`translate.cpp:462-471`，剥前导 `-`）；默认空串 |
+| RunMode 取值 | 四种：`usb`（C++ daemon 明确回绝 `E001000`）/裸 `port`（仅 C++）/`port <n>`/`port close` |
+| rootrun | 空载荷=root；`"r"`=取消 root（`daemon_unity.cpp:466-486`） |
+| 世代支持 | 上述六命令 **C++/Rust daemon 均实现**，故不做世代 gate，仅载荷变体有差异（裸 `port` 仅 C++） |
