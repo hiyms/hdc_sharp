@@ -29,11 +29,39 @@ public sealed class RealDeviceTheoryAttribute : TheoryAttribute
     }
 }
 
+/// <summary>
+/// 需真实签名 .hap 包才能执行的真机用例门控：在 <c>HDC_TEST_TARGET</c> 之外还需
+/// <c>HDC_TEST_HAP</c> 指向本地包路径且文件存在，否则跳过（真实包为机器相关资源，不进仓库）。
+/// </summary>
+public sealed class RealDeviceHapFactAttribute : FactAttribute
+{
+    /// <summary>创建特性：端点或包路径缺失时写入跳过原因。</summary>
+    public RealDeviceHapFactAttribute()
+    {
+        Skip = RealDeviceGate.SkipReason ?? RealDeviceGate.HapSkipReason;
+    }
+}
+
 /// <summary>真机集成测试的共同门控：环境变量名与跳过原因。</summary>
 internal static class RealDeviceGate
 {
     /// <summary>启用真机集成测试的环境变量名，取值为 daemon 端点（<c>ip:port</c>）。</summary>
     internal const string TargetEnvironmentVariable = "HDC_TEST_TARGET";
+
+    /// <summary>真实签名 .hap 包路径的环境变量名。</summary>
+    internal const string HapEnvironmentVariable = "HDC_TEST_HAP";
+
+    /// <summary>未提供可用的真实 .hap 包时的跳过原因；具备时为 null（不跳过）。</summary>
+    internal static string? HapSkipReason
+    {
+        get
+        {
+            string? path = Environment.GetEnvironmentVariable(HapEnvironmentVariable);
+            return string.IsNullOrWhiteSpace(path) || !File.Exists(path)
+                ? $"未设置 {HapEnvironmentVariable}=<本地 .hap 路径>（或文件不存在），需真实包的真机用例跳过"
+                : null;
+        }
+    }
 
     /// <summary>未配置真机端点时的跳过原因；已配置时为 null（不跳过）。</summary>
     internal static string? SkipReason =>

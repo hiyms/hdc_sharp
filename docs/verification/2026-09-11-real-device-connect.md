@@ -327,3 +327,67 @@ PASV
 | RunMode 取值 | 四种：`usb`（C++ daemon 明确回绝 `E001000`）/裸 `port`（仅 C++）/`port <n>`/`port close` |
 | rootrun | 空载荷=root；`"r"`=取消 root（`daemon_unity.cpp:466-486`） |
 | 世代支持 | 上述六命令 **C++/Rust daemon 均实现**，故不做世代 gate，仅载荷变体有差异（裸 `port` 仅 C++） |
+
+---
+
+## 11. 真实签名 hap 安装/卸载闭环验证（用户提供包，同日追加）
+
+包：`D:\projects\IsHongmengKernel\entry\build\default\outputs\default\entry-default-signed.hap`
+（2,818,491 字节，含 `libs/arm64-v8a/*` 原生库与 `module.json`，bundleName=`com.github.is_hongmeng_kernel`，versionCode=1000000）
+
+### 11.1 首先暴露的缺陷：真机安装成功却被误报为失败
+
+首次调用 `InstallAsync` 时返回：
+
+```
+HdcException: install bundle successfully.
+  ErrorCode=(null) Level=Fail
+```
+
+即 bm 明确打印 **successfully**，我们的库却抛异常。
+
+**定位（上游源码对比）**：APP_FINISH 载荷布局为 `[mode u8][success u8][bm 文本]`（`src/daemon/daemon_app.cpp:150-158`：
+`vecBuf.push_back(mode); vecBuf.push_back(exitStatus == 0); …`）。但官方 host **两个世代都直接跳过该字节**：
+
+| 世代 | 代码 | 行为 |
+|---|---|---|
+| C++ | `src/host/host_app.cpp:224-228` | `cmdOffset = 2`，`s = payload + 2`，只把文本交给 `CheckInstallContinue` 作信息输出 |
+| Rust | `hdc_rust/src/host/host_app.rs:143-155` | 同样 `payload[2..]`，`payload[1]` 未使用 |
+
+**根因**：我们按 `payload[1] == 0 → 失败` 判定，而本机设备的该字节恒为 0（即使 bm 成功），导致**必然误报**。
+
+**修复**（`AppOperation.ReadAppFinishPayload`）：判定以文本为主、字节为辅——
+文本含 `error`/`fail` → 失败；否则须有正面成功证据（success 字节非 0 **或** 文本含 `success` 字样）才算成功。
+既修掉误报，又保住 `[E006001] Not any installation package was found` 这类不含 error/fail 字样的失败识别。
+新增回归用例 `Install_SuccessByteZeroButSuccessText_DoesNotThrow`（FakeDaemon 复现字节=0 + successfully 文本）。
+
+### 11.2 真机生命周期闭环（严格交叉验证，非只看返回文本）
+
+以 `bm dump -n <bundle> 2>&1 | wc -l` 作为"是否已安装"的客观判据（存在时数百行，不存在时仅 1 行错误文本）：
+
+| 步骤 | 库返回 | 设备客观状态 |
+|---|---|---|
+| 初始 | — | 498 行 / `bm dump -a` 命中 1 → **已安装** |
+| `UninstallAsync` | `uninstall bundle successfully.` | **1 行 / 命中 0 → 确实已移除** |
+| `InstallAsync(hap, Replace)` | `install bundle successfully.`（1.9s） | **498 行 / 命中 1 → 确实已安装** |
+| `InstallAsync(hap, Replace)` 复装 | `install bundle successfully.`（0.5s） | 498 行 → 幂等覆盖安装正常 |
+
+**结论**：2.8MB 真实签名 hap 的**安装成功路径已在真机验证**（此前为未覆盖项）。
+`aa start` 启动失败（`10106102: The device screen is locked`）为设备锁屏/开发者模式限制，与库无关。
+
+### 11.3 固化为门控用例
+
+新增 `RealDeviceHapFactAttribute`（在 `HDC_TEST_TARGET` 之外还需 `HDC_TEST_HAP` 指向本地包且文件存在，否则跳过——
+真实包属机器相关资源，不进仓库）与 `RealDeviceAppLifecycleTests`：
+
+```
+HDC_TEST_TARGET=192.168.2.161:44221 \
+HDC_TEST_HAP=<本地 .hap 路径> \
+dotnet test tests/HdcSharp.Tests --filter "FullyQualifiedName~RealDeviceAppLifecycle"
+→ 1 通过 / 0 失败（8 秒）
+
+真机全量：--filter "RealDevice=true" → 40 通过 / 0 失败（24 秒）
+默认路径（无环境变量）：211 通过 / 26 跳过 / 0 失败
+```
+
+用例自带清理（末尾卸载回初始状态），包名由 `module.json` 解析而非硬编码。

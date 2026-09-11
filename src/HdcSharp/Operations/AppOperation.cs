@@ -438,7 +438,11 @@ internal static class AppOperation
 
     /// <summary>
     /// 解析 APP_FINISH 载荷 [mode u8][success u8][bm 输出文本]（daemon_app.cpp:150-158、daemon_app.rs:169-215）。
-    /// success=0 时错误码取文本中首个 [Exxxxxx] 片段（上游 ECHO 错误码格式 [E%06x]，server_for_client.cpp:1606）。
+    /// 成功判定以**文本**为准：官方 host 两个世代都直接跳过 success 字节，只取偏移 2 起的文本
+    /// 作信息输出（src/host/host_app.cpp:224-228、hdc_rust/src/host/host_app.rs:143-155）。
+    /// 真机实测 bm 打印 install bundle successfully 时该字节仍可能为 0，仅凭字节会误报失败；
+    /// 故仅当文本出现 error/fail 字样才视为失败，错误码取文本中首个 [Exxxxxx]
+    /// （上游 ECHO 错误码格式 [E%06x]，server_for_client.cpp:1606）。
     /// </summary>
     private static string ReadAppFinishPayload(byte[] payload)
     {
@@ -448,8 +452,17 @@ internal static class AppOperation
         }
 
         string message = Encoding.UTF8.GetString(payload.AsSpan(2));
-        return payload[1] == 0 ? throw new HdcException(message, TryExtractErrorCode(message)) : message;
+        // 判定规则（宽松于字节、严于纯文本）：文本出现 error/fail 一律失败；
+        // 否则须有正面成功证据（success 字节非 0 或文本含 success 字样），
+        // 以免把 "install bundle successfully." 这类仅字节为 0 的真机成功误报为失败
+        bool failed = LooksLikeFailure(message)
+            || (payload[1] == 0 && !message.Contains("success", StringComparison.OrdinalIgnoreCase));
+        return failed ? throw new HdcException(message, TryExtractErrorCode(message)) : message;
     }
+
+    private static bool LooksLikeFailure(string message) =>
+        message.Contains("error", StringComparison.OrdinalIgnoreCase)
+        || message.Contains("fail", StringComparison.OrdinalIgnoreCase);
 
     private static string? TryExtractErrorCode(string message)
     {

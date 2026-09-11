@@ -150,6 +150,23 @@ public class AppInstallTests : IDisposable
     }
 
     [Fact]
+    public async Task Install_SuccessByteZeroButSuccessText_DoesNotThrow()
+    {
+        // 真机实测：bm 打印 "install bundle successfully." 时 APP_FINISH 的 success 字节仍可能为 0，
+        // 而官方 host 两个世代都直接跳过该字节、只认文本（host_app.cpp:224-228、host_app.rs:143-155）
+        const string message = "install bundle successfully. ";
+        string hap = Path.Combine(_src, "real.hap");
+        await File.WriteAllBytesAsync(hap, RandomNumberGenerator.GetBytes(64));
+        using var daemon = FakeDaemon.WithInstallScript(success: false, output: message, sinkDirectory: _sink);
+        await using var host = new HdcHost();
+        HdcDevice device = await ConnectAsync(host, daemon);
+
+        string output = await WithTimeoutAsync(device.InstallAsync(hap), TestBudget);
+
+        Assert.Equal(message, output);
+    }
+
+    [Fact]
     public async Task Install_BeginNeverArrives_FailsWithDaemonMessage()
     {
         // Rust daemon 建临时文件失败时只回 APP_FINISH（不先回 APP_BEGIN，daemon_app.rs:385-392）
