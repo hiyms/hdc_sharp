@@ -2,7 +2,7 @@ name: docfx for GitHub Pages
 
 on:
   push:
-    branches: [ "main" ]  # �����͵� main ��֧ʱ����
+    branches: [ "main" ]  # 在推送到 main 分支时触发
 
 permissions:
   contents: read
@@ -17,15 +17,38 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4  # �����ֶ��������
+        uses: actions/checkout@v4  # 必须手动检出代码
 
       - name: Deploy Docs
         uses: sator-imaging/docfx-pages@v1
-        id: deployment  # ���ڻ�ȡ������ҳ�� URL
+        id: deployment  # 用于获取部署后的页面 URL
         with:
-          # �������
-          app_name: 'HdcSharp'        # Ӧ�����ƣ������ĵ���ʶ
-          site_title: 'Openharmony HDC for c#'   # ��վ�ı���
-          site_footer: 'Copyright ? 2026' # ҳ����Ϣ
-          # ��ѡ����
-          class_members: 'samePage'
+          # 必填参数
+          app_name: 'HdcSharp'                    # 应用名称，用于文档标识
+          site_title: 'Openharmony HDC for c#'    # 网站的标题
+          site_footer: 'Copyright &copy; 2026'    # 页脚信息
+          # 可选参数
+          class_members: 'samePage'               # 'separatePages' | 'samePage'
+
+          # main_js 是修复“没有顶栏和左侧边栏”的关键，必须导出 default 对象。
+          # 原因：action 会 `cp -n -r` 自己的 .docfx 覆盖 docfx 内置的
+          # template/public/main.js（内置版本内容是 `export default {}`），
+          # 而 action 自带的那份只有 initializePage() 片段、没有 default export。
+          # docfx modern 模板的引导脚本里执行的是：
+          #     let { start } = await import('./main.js').then(m => m.default)
+          # 没有 default export 时解构立刻抛 TypeError，被 zr().catch(console.error)
+          # 吞掉，于是之后的 #navbar / #toc / breadcrumb / affix / 搜索索引全部不渲染。
+          # 上游 Tests.yml 也是靠这里补上 export default 才能正常显示。
+          # 注意：action 内部用 echo "..." 拼接，故不能用双引号，反引号需转义。
+          main_js: |
+            export default {
+                defaultTheme: 'light',
+                showLightbox: (img) => true,
+                iconLinks: [
+                    {
+                        icon: 'github',
+                        href: 'https://github.com/hiyms/hdc_sharp',
+                        title: 'GitHub'
+                    },
+                ],
+            }
