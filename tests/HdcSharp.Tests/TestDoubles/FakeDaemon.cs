@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
@@ -85,6 +86,24 @@ public sealed class FakeDaemonOptions
 
     /// <summary>卸载剧本：收到 APP_UNINSTALL 后回 APP_FINISH（mode=2）。</summary>
     public bool AppUninstallEnabled { get; set; }
+
+    /// <summary>
+    /// fport 剧本：非 null 时按上游 daemon 从端语义处理 FORWARD_CHECK/ACTIVE_SLAVE/DATA/FREE_CONTEXT，
+    /// 并把 ACTIVE_SLAVE 载荷里的节点（<c>tcp:&lt;port&gt;</c>）真实拨通（等价 daemon 侧连接目标服务）。
+    /// </summary>
+    public bool ForwardEnabled { get; set; }
+
+    /// <summary>fport 剧本收到 FORWARD_CHECK 时回「仅含 cid、无结果字节」的 CHECK_RESULT，模拟设备侧拒绝（上游视为非法载荷）。</summary>
+    public bool ForwardRejectCheck { get; set; }
+
+    /// <summary>fport 剧本 CHECK_RESULT 的结果字节取值；上游两世代 daemon 均回 0，故默认 0。</summary>
+    public byte ForwardCheckResultFlag { get; set; }
+
+    /// <summary>
+    /// rport 剧本：非 null 时按上游 daemon 主端语义接收 FORWARD_INIT（载荷 <c>tcp:&lt;远端&gt; tcp:&lt;本地&gt;</c>），
+    /// 在设备侧监听远端端口，并向宿主推 FORWARD_CHECK/ACTIVE_SLAVE。
+    /// </summary>
+    public bool ForwardReverseEnabled { get; set; }
 }
 
 /// <summary>
@@ -105,6 +124,8 @@ public sealed class FakeDaemon : IDisposable
     private readonly ConcurrentDictionary<int, TcpClient> _clients = new();
     private readonly ConcurrentDictionary<int, Task> _connections = new();
     private readonly object _gate = new();
+    // 转发泵与帧循环会并发写同一 NetworkStream，帧必须串行写出
+    private readonly SemaphoreSlim _sendGate = new(1, 1);
     private readonly Task _acceptTask;
     private string? _hostPublicKeyPem;
     private bool _signatureVerified;
@@ -159,6 +180,33 @@ public sealed class FakeDaemon : IDisposable
         public (string Name, byte[] Content) PushCurrent { get; set; }
 
         public string PushPath { get; set; } = ".";
+    }
+
+    /// <summary>转发剧本里 daemon 侧与某个 cid 绑定的目标连接。</summary>
+    private sealed class TargetLink
+    {
+        public required TcpClient Client { get; init; }
+
+        public required NetworkStream Stream { get; init; }
+
+        /// <summary>fport 由 daemon 自己发 ACTIVE_MASTER，连接成功即可推流；rport 需等宿主回 ACTIVE_MASTER。</summary>
+        public TaskCompletionSource Active { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task Pump { get; set; } = Task.CompletedTask;
+    }
+
+    /// <summary>单个宿主连接上的转发剧本状态。</summary>
+    private sealed class ForwardRuntime
+    {
+        public ConcurrentDictionary<uint, TargetLink> Targets { get; } = new();
+
+        public TcpListener? ReverseListener { get; set; }
+
+        public uint ReverseCheckCid { get; set; }
+
+        public string ReverseCommand { get; set; } = "";
+
+        public Task? ReverseAcceptTask { get; set; }
     }
 
     /// <summary>在回环随机端口上启动假 daemon，并立即开始接受连接。</summary>
@@ -241,6 +289,7 @@ public sealed class FakeDaemon : IDisposable
 
         WaitQuietly(_acceptTask);
         WaitQuietly(Task.WhenAll(_connections.Values.ToArray()));
+        _sendGate.Dispose();
         _cts.Dispose();
     }
 
@@ -282,10 +331,11 @@ public sealed class FakeDaemon : IDisposable
     private async Task HandleConnectionAsync(TcpClient client, int id)
     {
         Dictionary<uint, FileTaskState> fileStates = [];
+        ForwardRuntime forward = new();
         try
         {
             NetworkStream stream = client.GetStream();
-            await RunScriptAsync(stream, new FrameDecoder(), new byte[8192], fileStates);
+            await RunScriptAsync(stream, new FrameDecoder(), new byte[8192], fileStates, forward);
         }
         catch (Exception ex) when (IsConnectionFault(ex))
         {
@@ -298,6 +348,7 @@ public sealed class FakeDaemon : IDisposable
                 state.Sink?.Dispose();
             }
 
+            await DisposeForwardAsync(forward);
             _clients.TryRemove(id, out _);
             _connections.TryRemove(id, out _);
             client.Dispose();
@@ -309,7 +360,8 @@ public sealed class FakeDaemon : IDisposable
         return ex is HdcException or IOException or SocketException or ObjectDisposedException or OperationCanceledException;
     }
 
-    private async Task RunScriptAsync(NetworkStream stream, FrameDecoder decoder, byte[] buffer, Dictionary<uint, FileTaskState> fileStates)
+    private async Task RunScriptAsync(
+        NetworkStream stream, FrameDecoder decoder, byte[] buffer, Dictionary<uint, FileTaskState> fileStates, ForwardRuntime forward)
     {
         CancellationToken ct = _cts.Token;
         if (await ReadFrameAsync(decoder, stream, buffer, ct) is not { Command: HdcCommand.KernelHandshake } helloFrame)
@@ -337,7 +389,7 @@ public sealed class FakeDaemon : IDisposable
             await SendAuthOkAsync(stream, hello.SessionId, ct);
             await SendHandshakeCloseAsync(stream, ct);
             await SendStrayFrameIfConfiguredAsync(stream, ct);
-            await RunTaskLoopAsync(decoder, stream, buffer, fileStates, ct);
+            await RunTaskLoopAsync(decoder, stream, buffer, fileStates, forward, ct);
             return;
         }
 
@@ -392,21 +444,26 @@ public sealed class FakeDaemon : IDisposable
         await SendAuthOkAsync(stream, hello.SessionId, ct);
         await SendHandshakeCloseAsync(stream, ct);
         await SendStrayFrameIfConfiguredAsync(stream, ct);
-        await RunTaskLoopAsync(decoder, stream, buffer, fileStates, ct);
+        await RunTaskLoopAsync(decoder, stream, buffer, fileStates, forward, ct);
     }
 
     private async Task RunTaskLoopAsync(
-        FrameDecoder decoder, NetworkStream stream, byte[] buffer, Dictionary<uint, FileTaskState> fileStates, CancellationToken ct)
+        FrameDecoder decoder, NetworkStream stream, byte[] buffer, Dictionary<uint, FileTaskState> fileStates, ForwardRuntime forward, CancellationToken ct)
     {
         while (await ReadFrameAsync(decoder, stream, buffer, ct) is { } frame)
         {
-            await HandleTaskFrameAsync(stream, frame, fileStates, ct);
+            await HandleTaskFrameAsync(stream, frame, fileStates, forward, ct);
         }
     }
 
     private async Task HandleTaskFrameAsync(
-        NetworkStream stream, Frame frame, Dictionary<uint, FileTaskState> fileStates, CancellationToken ct)
+        NetworkStream stream, Frame frame, Dictionary<uint, FileTaskState> fileStates, ForwardRuntime forward, CancellationToken ct)
     {
+        if (await TryHandleForwardFrameAsync(stream, frame, forward, ct))
+        {
+            return;
+        }
+
         if (await TryHandleAppFrameAsync(stream, frame, fileStates, ct))
         {
             return;
@@ -441,6 +498,340 @@ public sealed class FakeDaemon : IDisposable
             default:
                 break;
         }
+    }
+
+    /// <summary>
+    /// 端口转发剧本（对齐上游 daemon：src/common/forward.cpp、hdc_rust/src/common/forward.rs）。
+    /// fport：CHECK → CHECK_RESULT；ACTIVE_SLAVE → 拨通节点并回 ACTIVE_MASTER；DATA 双向搬运；FREE_CONTEXT 关目标连接。
+    /// rport：INIT → 设备侧监听远端端口 → 推 WAKEUP + CHECK → 收 CHECK_RESULT 后回 FORWARD_SUCCESS；accept 后推 ACTIVE_SLAVE。
+    /// </summary>
+    private async Task<bool> TryHandleForwardFrameAsync(
+        NetworkStream stream, Frame frame, ForwardRuntime forward, CancellationToken ct)
+    {
+        if (!_options.ForwardEnabled && !_options.ForwardReverseEnabled)
+        {
+            return false;
+        }
+
+        switch (frame.Command)
+        {
+            case HdcCommand.KernelWakeupSlavetask:
+                // 宿主 fport 用它预建 daemon 侧任务槽；本替身无任务槽，仅吸收
+                return true;
+            case HdcCommand.ForwardCheck when _options.ForwardEnabled:
+                await HandleForwardCheckAsync(stream, frame, ct).ConfigureAwait(false);
+                return true;
+            case HdcCommand.ForwardActiveSlave when _options.ForwardEnabled:
+                await HandleForwardActiveSlaveAsync(stream, frame, forward, ct).ConfigureAwait(false);
+                return true;
+            case HdcCommand.ForwardInit when _options.ForwardReverseEnabled:
+                await HandleReverseInitAsync(stream, frame, forward, ct).ConfigureAwait(false);
+                return true;
+            case HdcCommand.ForwardCheckResult when forward.ReverseCheckCid != 0:
+                await HandleReverseCheckResultAsync(stream, frame, forward, ct).ConfigureAwait(false);
+                return true;
+            case HdcCommand.ForwardActiveMaster when TryReadCid(frame.Payload, out uint masterCid):
+                if (forward.Targets.TryGetValue(masterCid, out TargetLink? master))
+                {
+                    master.Active.TrySetResult();
+                }
+
+                return true;
+            case HdcCommand.ForwardData:
+                await HandleForwardDataAsync(stream, frame, forward, ct).ConfigureAwait(false);
+                return true;
+            case HdcCommand.ForwardFreeContext:
+                if (TryReadCid(frame.Payload, out uint freeCid) && forward.Targets.TryRemove(freeCid, out TargetLink? freeTarget))
+                {
+                    freeTarget.Client.Close();
+                }
+
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private async Task HandleForwardCheckAsync(NetworkStream stream, Frame frame, CancellationToken ct)
+    {
+        if (!TryReadCid(frame.Payload, out uint cid))
+        {
+            return;
+        }
+
+        // 上游两世代 daemon 对 TCP 节点均回 0（真相“可达”由载荷存在与否表达，宿主的取值判断是历史缺陷）
+        byte[] payload = _options.ForwardRejectCheck
+            ? CidPayload(cid)
+            : [.. CidPayload(cid), _options.ForwardCheckResultFlag];
+        await SendFrameAsync(stream, frame.ChannelId, HdcCommand.ForwardCheckResult, payload, ct).ConfigureAwait(false);
+    }
+
+    private async Task HandleForwardActiveSlaveAsync(
+        NetworkStream stream, Frame frame, ForwardRuntime forward, CancellationToken ct)
+    {
+        if (!TryReadCid(frame.Payload, out uint cid) || !TryParseNode(ReadNode(frame.Payload), out int port))
+        {
+            return;
+        }
+
+        TcpClient? client = null;
+        TargetLink? link;
+        try
+        {
+            client = new TcpClient();
+            await client.ConnectAsync(IPAddress.Loopback, port, ct).ConfigureAwait(false);
+            client.NoDelay = true;
+            link = new TargetLink { Client = client, Stream = client.GetStream() };
+        }
+        catch (Exception ex) when (ex is SocketException or IOException or ObjectDisposedException or OperationCanceledException)
+        {
+            client?.Dispose();
+            await SendFrameAsync(stream, frame.ChannelId, HdcCommand.ForwardFreeContext, CidPayload(cid), ct).ConfigureAwait(false);
+            return;
+        }
+
+        link.Active.TrySetResult();
+        if (!forward.Targets.TryAdd(cid, link))
+        {
+            link.Client.Close();
+            await SendFrameAsync(stream, frame.ChannelId, HdcCommand.ForwardFreeContext, CidPayload(cid), ct).ConfigureAwait(false);
+            return;
+        }
+
+        await SendFrameAsync(stream, frame.ChannelId, HdcCommand.ForwardActiveMaster, CidPayload(cid), ct).ConfigureAwait(false);
+        link.Pump = Task.Run(() => PumpTargetAsync(stream, frame.ChannelId, cid, link, forward, ct), CancellationToken.None);
+    }
+
+    private async Task HandleForwardDataAsync(
+        NetworkStream stream, Frame frame, ForwardRuntime forward, CancellationToken ct)
+    {
+        if (frame.Payload.Length <= ForwardCidSize || !TryReadCid(frame.Payload, out uint cid))
+        {
+            return;
+        }
+
+        if (!forward.Targets.TryGetValue(cid, out TargetLink? link))
+        {
+            return;
+        }
+
+        try
+        {
+            await link.Stream.WriteAsync(frame.Payload.AsMemory(ForwardCidSize), ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or SocketException or ObjectDisposedException)
+        {
+            if (forward.Targets.TryRemove(cid, out TargetLink? dead))
+            {
+                dead.Client.Close();
+            }
+
+            await SendFrameAsync(stream, frame.ChannelId, HdcCommand.ForwardFreeContext, CidPayload(cid), ct).ConfigureAwait(false);
+        }
+    }
+
+    private async Task PumpTargetAsync(
+        NetworkStream stream, uint channelId, uint cid, TargetLink link, ForwardRuntime forward, CancellationToken ct)
+    {
+        byte[] buffer = new byte[32 * 1024];
+        try
+        {
+            await link.Active.Task.WaitAsync(ct).ConfigureAwait(false);
+            while (true)
+            {
+                int read = await link.Stream.ReadAsync(buffer, ct).ConfigureAwait(false);
+                if (read <= 0)
+                {
+                    break;
+                }
+
+                byte[] payload = new byte[ForwardCidSize + read];
+                BinaryPrimitives.WriteUInt32BigEndian(payload, cid);
+                buffer.AsSpan(0, read).CopyTo(payload.AsSpan(ForwardCidSize));
+                await SendFrameAsync(stream, channelId, HdcCommand.ForwardData, payload, ct).ConfigureAwait(false);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or SocketException or ObjectDisposedException or OperationCanceledException)
+        {
+        }
+        finally
+        {
+            if (forward.Targets.TryRemove(cid, out _))
+            {
+                try
+                {
+                    await SendFrameAsync(
+                        stream, channelId, HdcCommand.ForwardFreeContext, CidPayload(cid), CancellationToken.None).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is IOException or SocketException or ObjectDisposedException or OperationCanceledException)
+                {
+                }
+            }
+
+            link.Client.Dispose();
+        }
+    }
+
+    private async Task HandleReverseInitAsync(
+        NetworkStream stream, Frame frame, ForwardRuntime forward, CancellationToken ct)
+    {
+        string command = Encoding.UTF8.GetString(frame.Payload);
+        string[] nodes = command.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (nodes.Length < 2 || !TryParseNode(nodes[0], out int remotePort) || !TryParseNode(nodes[1], out int localNodePort))
+        {
+            byte[] failure = [(byte)MessageLevel.Fail, .. Encoding.UTF8.GetBytes("Forward parament failed")];
+            await SendFrameAsync(stream, frame.ChannelId, HdcCommand.KernelEcho, failure, ct).ConfigureAwait(false);
+            await SendFrameAsync(stream, frame.ChannelId, HdcCommand.KernelChannelClose, [1], ct).ConfigureAwait(false);
+            return;
+        }
+
+        var listener = new TcpListener(IPAddress.Loopback, remotePort);
+        listener.Start();
+        forward.ReverseListener = listener;
+        forward.ReverseCommand = command;
+        forward.ReverseCheckCid = NewCid();
+        string localNode = $"tcp:{localNodePort}";
+        await SendFrameAsync(stream, frame.ChannelId, HdcCommand.KernelWakeupSlavetask, [], ct).ConfigureAwait(false);
+        await SendFrameAsync(
+            stream, frame.ChannelId, HdcCommand.ForwardCheck, ParameterPayload(forward.ReverseCheckCid, localNode), ct)
+            .ConfigureAwait(false);
+        uint channelId = frame.ChannelId;
+        forward.ReverseAcceptTask = Task.Run(
+            () => ReverseAcceptLoopAsync(stream, channelId, listener, localNode, forward, ct), CancellationToken.None);
+    }
+
+    private async Task HandleReverseCheckResultAsync(
+        NetworkStream stream, Frame frame, ForwardRuntime forward, CancellationToken ct)
+    {
+        if (!TryReadCid(frame.Payload, out uint cid) || cid != forward.ReverseCheckCid)
+        {
+            return;
+        }
+
+        // serverOrDaemon=false（daemon 侧任务）→ "0|"，宿主据此识别为反向转发
+        byte[] payload = Encoding.UTF8.GetBytes("0|" + forward.ReverseCommand);
+        await SendFrameAsync(stream, frame.ChannelId, HdcCommand.ForwardSuccess, payload, ct).ConfigureAwait(false);
+    }
+
+    private async Task ReverseAcceptLoopAsync(
+        NetworkStream stream, uint channelId, TcpListener listener, string localNode, ForwardRuntime forward, CancellationToken ct)
+    {
+        try
+        {
+            while (true)
+            {
+                TcpClient client = await listener.AcceptTcpClientAsync(ct).ConfigureAwait(false);
+                client.NoDelay = true;
+                uint cid = NewCid();
+                var link = new TargetLink { Client = client, Stream = client.GetStream() };
+                if (!forward.Targets.TryAdd(cid, link))
+                {
+                    client.Dispose();
+                    continue;
+                }
+
+                await SendFrameAsync(stream, channelId, HdcCommand.ForwardActiveSlave, ParameterPayload(cid, localNode), ct)
+                    .ConfigureAwait(false);
+                link.Pump = Task.Run(() => PumpTargetAsync(stream, channelId, cid, link, forward, ct), CancellationToken.None);
+            }
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException or SocketException or IOException)
+        {
+        }
+    }
+
+    private static async Task DisposeForwardAsync(ForwardRuntime forward)
+    {
+        forward.ReverseListener?.Stop();
+        TargetLink[] links = [.. forward.Targets.Values];
+        foreach (TargetLink link in links)
+        {
+            link.Client.Close();
+        }
+
+        if (forward.ReverseAcceptTask is { } accept)
+        {
+            await WaitQuietlyAsync(accept).ConfigureAwait(false);
+        }
+
+        foreach (TargetLink link in links)
+        {
+            await WaitQuietlyAsync(link.Pump).ConfigureAwait(false);
+        }
+    }
+
+    private static async Task WaitQuietlyAsync(Task task)
+    {
+        try
+        {
+            await task.WaitAsync(ShutdownTimeout).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // 测试替身后台异常不影响释放语义
+        }
+    }
+
+    private const int ForwardCidSize = 4;
+
+    private const int ForwardParameterPrefixSize = 8;
+
+    private static byte[] CidPayload(uint cid)
+    {
+        byte[] payload = new byte[ForwardCidSize];
+        BinaryPrimitives.WriteUInt32BigEndian(payload, cid);
+        return payload;
+    }
+
+    private static byte[] ParameterPayload(uint cid, string node)
+    {
+        byte[] nodeBytes = Encoding.UTF8.GetBytes(node);
+        byte[] payload = new byte[ForwardCidSize + ForwardParameterPrefixSize + nodeBytes.Length + 1];
+        BinaryPrimitives.WriteUInt32BigEndian(payload, cid);
+        nodeBytes.CopyTo(payload, ForwardCidSize + ForwardParameterPrefixSize);
+        return payload;
+    }
+
+    private static bool TryReadCid(byte[] payload, out uint cid)
+    {
+        if (payload.Length < ForwardCidSize)
+        {
+            cid = 0;
+            return false;
+        }
+
+        cid = BinaryPrimitives.ReadUInt32BigEndian(payload);
+        return true;
+    }
+
+    private static string ReadNode(byte[] payload)
+    {
+        int start = ForwardCidSize + ForwardParameterPrefixSize;
+        if (payload.Length <= start)
+        {
+            return string.Empty;
+        }
+
+        int end = Array.IndexOf(payload, (byte)0, start);
+        if (end < 0)
+        {
+            end = payload.Length;
+        }
+
+        return Encoding.UTF8.GetString(payload, start, end - start);
+    }
+
+    private static bool TryParseNode(string node, out int port)
+    {
+        port = 0;
+        return node.StartsWith("tcp:", StringComparison.Ordinal)
+            && int.TryParse(node.AsSpan(4), out port)
+            && port is > 0 and <= 65535;
+    }
+
+    private static uint NewCid()
+    {
+        return (uint)Random.Shared.NextInt64(1, 1L + uint.MaxValue);
     }
 
     /// <summary>
@@ -582,7 +973,7 @@ public sealed class FakeDaemon : IDisposable
         return true;
     }
 
-    private static Task SendPushCheckAsync(NetworkStream stream, uint channelId, FileTaskState state, CancellationToken ct)
+    private Task SendPushCheckAsync(NetworkStream stream, uint channelId, FileTaskState state, CancellationToken ct)
     {
         var config = new TransferConfig
         {
@@ -783,7 +1174,7 @@ public sealed class FakeDaemon : IDisposable
         state.Sink = null;
     }
 
-    private static async Task<bool> PushFileDataAsync(NetworkStream stream, uint channelId, FileTaskState state, CancellationToken ct)
+    private async Task<bool> PushFileDataAsync(NetworkStream stream, uint channelId, FileTaskState state, CancellationToken ct)
     {
         state.PushPending = false;
         byte[] data = state.PushCurrent.Content;
@@ -810,7 +1201,7 @@ public sealed class FakeDaemon : IDisposable
         return true;
     }
 
-    private static async Task<bool> HandlePushFinishAsync(
+    private async Task<bool> HandlePushFinishAsync(
         NetworkStream stream, Frame frame, FileTaskState state, CancellationToken ct)
     {
         if (frame.Payload.Length == 0 || frame.Payload[0] != 1)
@@ -875,9 +1266,18 @@ public sealed class FakeDaemon : IDisposable
         }
     }
 
-    private static Task SendFrameAsync(NetworkStream stream, uint channelId, HdcCommand command, byte[] payload, CancellationToken ct)
+    private async Task SendFrameAsync(NetworkStream stream, uint channelId, HdcCommand command, byte[] payload, CancellationToken ct)
     {
-        return stream.WriteAsync(FrameCodec.Encode(channelId, command, payload), ct).AsTask();
+        // 转发泵与帧循环会并发写同一 NetworkStream，必须串行化整帧写出
+        await _sendGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await stream.WriteAsync(FrameCodec.Encode(channelId, command, payload), ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            _sendGate.Release();
+        }
     }
 
     private async Task DrainAsync(FrameDecoder decoder, NetworkStream stream, byte[] buffer, CancellationToken ct)

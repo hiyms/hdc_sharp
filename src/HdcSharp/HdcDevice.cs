@@ -298,4 +298,36 @@ public sealed class HdcDevice
         ArgumentException.ThrowIfNullOrEmpty(packageName);
         return AppOperation.UninstallAsync(this, packageName, options, ct);
     }
+
+    /// <summary>
+    /// 建立正向 TCP 端口转发（fport，spec §4.8）：本机监听 <paramref name="localPort"/>，
+    /// 设备侧把每条入站连接转接到其本机的 <paramref name="remotePort"/>（一期仅支持 <c>tcp:</c> 节点）。
+    /// 返回时会等待设备侧校验通过；取消令牌与会话同生命周期，取消即释放。
+    /// </summary>
+    /// <param name="localPort">本机监听端口；0 表示由系统自动分配（实际端口见 <see cref="IForwardSession.ListenPort"/>）。</param>
+    /// <param name="remotePort">设备侧目标端口，须为 1-65535。</param>
+    /// <param name="ct">取消令牌；取消会终结本次会话并清理通道。</param>
+    /// <returns>已建立的转发会话；须释放以停止监听并向设备端注销规则。</returns>
+    /// <exception cref="ArgumentOutOfRangeException">端口超出取值范围。</exception>
+    /// <exception cref="HdcException">本地端口无法监听、设备侧拒绝校验或连接断开。</exception>
+    public Task<IForwardSession> ForwardTcpAsync(int localPort, int remotePort, CancellationToken ct = default)
+    {
+        return ForwardOperation.ForwardTcpAsync(this, localPort, remotePort, ct);
+    }
+
+    /// <summary>
+    /// 建立反向 TCP 端口转发（rport，spec §4.8）：设备侧监听 <paramref name="remotePort"/>，
+    /// 每条入站连接由本机连接 <c>127.0.0.1:&lt;localPort&gt;</c>。
+    /// 返回时会等待设备侧确认监听成功；取消令牌与会话同生命周期，取消即释放。
+    /// </summary>
+    /// <param name="remotePort">设备侧监听端口，须为 1-65535。</param>
+    /// <param name="localPort">本机目标服务端口，须为 1-65535。</param>
+    /// <param name="ct">取消令牌；取消会终结本次会话并清理通道。</param>
+    /// <returns>已建立的转发会话；须释放以向设备端注销规则。</returns>
+    /// <exception cref="ArgumentOutOfRangeException">端口超出取值范围。</exception>
+    /// <exception cref="HdcException">设备侧拒绝（如端口被占用）或连接断开。</exception>
+    public Task<IForwardSession> ReverseTcpAsync(int remotePort, int localPort, CancellationToken ct = default)
+    {
+        return ForwardOperation.ReverseTcpAsync(this, remotePort, localPort, ct);
+    }
 }
