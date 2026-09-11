@@ -1,3 +1,6 @@
+using System.Text;
+using HdcSharp.Operations;
+using HdcSharp.Protocol;
 using HdcSharp.Transport;
 
 namespace HdcSharp;
@@ -10,6 +13,7 @@ public sealed class HdcDevice
 {
     private readonly HashSet<uint> _channelIds = [];
     private readonly object _channelIdGate = new();
+    private readonly ChannelDispatcher _dispatcher;
     private int _state = (int)HdcDeviceState.Connecting;
     private string _deviceName = "";
     private DaemonGeneration _generation = DaemonGeneration.Unknown;
@@ -20,6 +24,7 @@ public sealed class HdcDevice
         Endpoint = connectKey;
         Connection = connection;
         SessionId = connection.SessionId;
+        _dispatcher = new ChannelDispatcher(connection);
     }
 
     /// <summary>连接键（ip:port），即 <see cref="HdcHost.ConnectAsync"/> 的 endpoint，用于查找与断开。</summary>
@@ -44,6 +49,9 @@ public sealed class HdcDevice
     public event EventHandler<DeviceStateChangedEventArgs>? StateChanged;
 
     internal HdcConnection Connection { get; }
+
+    /// <summary>按 channelId 分发入站帧的设备级分发器（Task 14 起各操作共用）。</summary>
+    internal ChannelDispatcher Dispatcher => _dispatcher;
 
     internal DaemonCapabilities Capabilities { get; private set; } = new();
 
@@ -93,5 +101,78 @@ public sealed class HdcDevice
         {
             // 用户事件处理器异常不得打断连接状态机
         }
+    }
+
+    /// <summary>
+    /// 执行一次性 shell 命令（UNITY_EXECUTE 1001），等待 daemon 关闭通道后返回聚合输出。
+    /// stdout 与 stderr 合并为同一 UTF-8 文本流（daemon 均以 ECHO_RAW 下发）；退出码不上线（spec §4.11），
+    /// 需要时可在命令中追加 <c>echo $?</c>。
+    /// </summary>
+    /// <param name="command">命令原文，原样发送给设备 shell。</param>
+    /// <param name="ct">取消令牌；取消时发送 CHANNEL_CLOSE[0] 后清理通道。</param>
+    /// <returns>聚合输出文本（按字节收集后整体 UTF-8 解码）。</returns>
+    /// <exception cref="HdcException">daemon 回显 Fail 级错误、命令执行失败或连接断开。</exception>
+    public Task<string> ExecuteShellAsync(string command, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        return ShellOperation.ExecuteAsync(this, HdcCommand.UnityExecute, Encoding.UTF8.GetBytes(command), ct);
+    }
+
+    /// <summary>
+    /// 执行一次性 shell 命令并以 daemon 原始分块流式产出输出（不聚合、不做 UTF-8 解码）。
+    /// 适合 hilog、大输出或需要边收边处理的场景。
+    /// </summary>
+    /// <param name="command">命令原文，原样发送给设备 shell。</param>
+    /// <param name="ct">取消令牌；取消或消费方提前退出时发送 CHANNEL_CLOSE[0] 后清理通道。</param>
+    /// <returns>daemon 输出分块序列。</returns>
+    /// <exception cref="HdcException">连接断开。</exception>
+    public IAsyncEnumerable<byte[]> StreamShellOutputAsync(string command, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        return ShellOperation.StreamAsync(this, HdcCommand.UnityExecute, Encoding.UTF8.GetBytes(command), ct);
+    }
+
+    /// <summary>
+    /// 打开交互式 shell（PTY，SHELL_INIT 2000）：<see cref="IInteractiveShell.Input"/> 写入即发送 SHELL_DATA，
+    /// <see cref="IInteractiveShell.Output"/> 读取 daemon 原始输出，控制字节 0x03/0x04 由 daemon 解释、库原样转发。
+    /// </summary>
+    /// <param name="ct">取消令牌。</param>
+    /// <returns>交互式 shell 会话；须释放以终结通道。</returns>
+    /// <exception cref="HdcException">发送 SHELL_INIT 失败或连接断开。</exception>
+    public Task<IInteractiveShell> OpenInteractiveShellAsync(CancellationToken ct = default)
+    {
+        return ShellOperation.OpenInteractiveAsync(this, ct);
+    }
+
+    /// <summary>
+    /// 以沙箱包名执行一次性 shell（UNITY_EXECUTE_EX 1200 + Tlv32，spec §4.9），仅 C++ 世代 daemon 支持。
+    /// 载荷同时携带命令与包名两个标签（上游 daemon 缺包名会回绝为 [E003004]）。
+    /// </summary>
+    /// <param name="command">命令原文。</param>
+    /// <param name="options">必须提供 <see cref="ShellOptions.BundleName"/>。</param>
+    /// <param name="ct">取消令牌；取消时发送 CHANNEL_CLOSE[0] 后清理通道。</param>
+    /// <returns>聚合输出文本。</returns>
+    /// <exception cref="HdcException">daemon 世代不是 C++，或 daemon 回显 Fail 级错误、连接断开。</exception>
+    /// <exception cref="ArgumentException">未提供沙箱包名。</exception>
+    public Task<string> ExecuteUnityAsync(string command, ShellOptions? options = null, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        if (Generation != DaemonGeneration.Cpp)
+        {
+            throw new HdcException($"沙箱 shell（1200/Tlv32）仅 C++ 世代 daemon 支持，当前世代为 {Generation}");
+        }
+
+        string bundleName = options?.BundleName ?? "";
+        if (bundleName.Length == 0)
+        {
+            throw new ArgumentException("沙箱 shell 必须提供应用包名（上游 daemon 同时要求命令与包名的 Tlv32 标签）", nameof(options));
+        }
+
+        Dictionary<uint, byte[]> entries = new()
+        {
+            [Tlv32.TagShellCmd] = Encoding.UTF8.GetBytes(command),
+            [Tlv32.TagShellBundle] = Encoding.UTF8.GetBytes(bundleName),
+        };
+        return ShellOperation.ExecuteAsync(this, HdcCommand.UnityExecuteEx, Tlv32.Serialize(entries), ct);
     }
 }

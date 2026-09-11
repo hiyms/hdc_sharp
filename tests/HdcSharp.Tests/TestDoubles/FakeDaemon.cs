@@ -27,6 +27,27 @@ public sealed class FakeDaemonOptions
 
     /// <summary>收到 host 的 AUTH_PUBLICKEY 后不回包也不断开，用于认证超时用例。</summary>
     public bool StallAfterPublicKey { get; set; }
+
+    /// <summary>一次性 shell（1001/1200）的输出分块剧本；null 时按 <see cref="EchoShellCommand"/> 决定是否回显命令。</summary>
+    public IReadOnlyList<byte[]>? ShellChunks { get; set; }
+
+    /// <summary>一次性 shell 是否把收到的命令原文回显为输出（并发隔离用例据此按通道区分响应）。</summary>
+    public bool EchoShellCommand { get; set; }
+
+    /// <summary>输出分块与 ECHO 消息发完后是否发送 CHANNEL_CLOSE[1] 终结通道；false 用于模拟长命/挂起命令。</summary>
+    public bool ShellClosesAfterOutput { get; set; } = true;
+
+    /// <summary>一次性 shell 结束帧 CHANNEL_CLOSE 的跳数值；0 模拟对端确认式关闭。</summary>
+    public byte ShellCloseHops { get; set; } = 1;
+
+    /// <summary>交互式 shell（SHELL_INIT）剧本：对每个 SHELL_DATA 原样回显，载荷含 0x04 时关闭通道。</summary>
+    public bool InteractiveEcho { get; set; }
+
+    /// <summary>一次性 shell 输出后追加的 KERNEL_ECHO 消息，用于覆盖 daemon 报错回显路径。</summary>
+    public IReadOnlyList<(MessageLevel Level, string Text)>? ShellEchoMessages { get; set; }
+
+    /// <summary>认证完成后在指定通道上发一条 ECHO_RAW 的野帧，用于覆盖未注册通道边界；null 不发。</summary>
+    public uint? StrayEchoChannelId { get; set; }
 }
 
 /// <summary>
@@ -43,6 +64,7 @@ public sealed class FakeDaemon : IDisposable
     private readonly TcpListener _listener;
     private readonly CancellationTokenSource _cts = new();
     private readonly List<(uint ChannelId, HdcCommand Cmd)> _received = [];
+    private readonly List<Frame> _receivedFrames = [];
     private readonly ConcurrentDictionary<int, TcpClient> _clients = new();
     private readonly ConcurrentDictionary<int, Task> _connections = new();
     private readonly object _gate = new();
@@ -74,6 +96,18 @@ public sealed class FakeDaemon : IDisposable
             lock (_gate)
             {
                 return _received.ToArray();
+            }
+        }
+    }
+
+    /// <summary>收到的全部帧快照（含握手帧与载荷），按到达顺序。</summary>
+    public IReadOnlyList<Frame> ReceivedFrames
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _receivedFrames.ToArray();
             }
         }
     }
@@ -209,7 +243,8 @@ public sealed class FakeDaemon : IDisposable
         {
             await SendAuthOkAsync(stream, hello.SessionId, ct);
             await SendHandshakeCloseAsync(stream, ct);
-            await DrainAsync(decoder, stream, buffer, ct);
+            await SendStrayFrameIfConfiguredAsync(stream, ct);
+            await RunTaskLoopAsync(decoder, stream, buffer, ct);
             return;
         }
 
@@ -263,7 +298,92 @@ public sealed class FakeDaemon : IDisposable
 
         await SendAuthOkAsync(stream, hello.SessionId, ct);
         await SendHandshakeCloseAsync(stream, ct);
-        await DrainAsync(decoder, stream, buffer, ct);
+        await SendStrayFrameIfConfiguredAsync(stream, ct);
+        await RunTaskLoopAsync(decoder, stream, buffer, ct);
+    }
+
+    private async Task RunTaskLoopAsync(FrameDecoder decoder, NetworkStream stream, byte[] buffer, CancellationToken ct)
+    {
+        while (await ReadFrameAsync(decoder, stream, buffer, ct) is { } frame)
+        {
+            await HandleTaskFrameAsync(stream, frame, ct);
+        }
+    }
+
+    private async Task HandleTaskFrameAsync(NetworkStream stream, Frame frame, CancellationToken ct)
+    {
+        switch (frame.Command)
+        {
+            case HdcCommand.UnityExecute:
+                await RunShellOutputScriptAsync(stream, frame, Encoding.UTF8.GetString(frame.Payload), ct);
+                break;
+            case HdcCommand.UnityExecuteEx:
+                await RunShellOutputScriptAsync(stream, frame, string.Empty, ct);
+                break;
+            case HdcCommand.ShellData when _options.InteractiveEcho:
+                await SendFrameAsync(stream, frame.ChannelId, HdcCommand.KernelEchoRaw, frame.Payload, ct);
+                if (Array.IndexOf(frame.Payload, (byte)0x04) >= 0)
+                {
+                    await SendFrameAsync(stream, frame.ChannelId, HdcCommand.KernelChannelClose, [1], ct);
+                }
+
+                break;
+            case HdcCommand.KernelChannelClose when frame.Payload.Length > 0 && frame.Payload[0] > 0:
+                // 与 daemon 的跳数语义一致：收到非零 CLOSE 时递减回发一次
+                await SendFrameAsync(
+                    stream, frame.ChannelId, HdcCommand.KernelChannelClose, [(byte)(frame.Payload[0] - 1)], ct);
+                break;
+            default:
+                break;
+        }
+    }
+
+    private async Task RunShellOutputScriptAsync(NetworkStream stream, Frame frame, string command, CancellationToken ct)
+    {
+        foreach (byte[] chunk in ResolveShellChunks(command))
+        {
+            await SendFrameAsync(stream, frame.ChannelId, HdcCommand.KernelEchoRaw, chunk, ct);
+        }
+
+        if (_options.ShellEchoMessages is { } messages)
+        {
+            foreach ((MessageLevel level, string text) in messages)
+            {
+                byte[] textBytes = Encoding.UTF8.GetBytes(text);
+                byte[] payload = new byte[textBytes.Length + 1];
+                payload[0] = (byte)level;
+                textBytes.CopyTo(payload, 1);
+                await SendFrameAsync(stream, frame.ChannelId, HdcCommand.KernelEcho, payload, ct);
+            }
+        }
+
+        if (_options.ShellClosesAfterOutput)
+        {
+            await SendFrameAsync(stream, frame.ChannelId, HdcCommand.KernelChannelClose, [_options.ShellCloseHops], ct);
+        }
+    }
+
+    private IReadOnlyList<byte[]> ResolveShellChunks(string command)
+    {
+        if (_options.ShellChunks is { } chunks)
+        {
+            return chunks;
+        }
+
+        return _options.EchoShellCommand ? [Encoding.UTF8.GetBytes(command)] : [];
+    }
+
+    private async Task SendStrayFrameIfConfiguredAsync(NetworkStream stream, CancellationToken ct)
+    {
+        if (_options.StrayEchoChannelId is { } channelId)
+        {
+            await SendFrameAsync(stream, channelId, HdcCommand.KernelEchoRaw, "stray"u8.ToArray(), ct);
+        }
+    }
+
+    private static Task SendFrameAsync(NetworkStream stream, uint channelId, HdcCommand command, byte[] payload, CancellationToken ct)
+    {
+        return stream.WriteAsync(FrameCodec.Encode(channelId, command, payload), ct).AsTask();
     }
 
     private async Task DrainAsync(FrameDecoder decoder, NetworkStream stream, byte[] buffer, CancellationToken ct)
@@ -295,15 +415,27 @@ public sealed class FakeDaemon : IDisposable
 
     private void RecordCommand(Frame frame)
     {
-        if (frame.Command == HdcCommand.KernelHandshake)
-        {
-            return;
-        }
-
         lock (_gate)
         {
-            _received.Add((frame.ChannelId, frame.Command));
+            _receivedFrames.Add(frame);
+            if (frame.Command != HdcCommand.KernelHandshake)
+            {
+                _received.Add((frame.ChannelId, frame.Command));
+            }
         }
+    }
+
+    /// <summary>创建“收到一次性 shell 后依次回各分块并关闭通道”的假 daemon（Rust 世代、免认证）。</summary>
+    /// <param name="chunks">按 UTF-8 编码的回显分块。</param>
+    public static FakeDaemon WithShellScript(params string[] chunks)
+    {
+        return new FakeDaemon(new FakeDaemonOptions { ShellChunks = chunks.Select(Encoding.UTF8.GetBytes).ToArray() });
+    }
+
+    /// <summary>创建“交互式 shell 回显”的假 daemon（Rust 世代、免认证）。</summary>
+    public static FakeDaemon WithInteractiveEcho()
+    {
+        return new FakeDaemon(new FakeDaemonOptions { InteractiveEcho = true });
     }
 
     private Task SendAuthOkAsync(NetworkStream stream, uint sessionId, CancellationToken ct)

@@ -23,6 +23,11 @@ public enum HdcCommand : uint
     /// <summary>宿主→daemon 一次性 shell，载荷为命令字符串。</summary>
     UnityExecute = 1001,
 
+    /// <summary>宿主→daemon 带选项的一次性 shell（Tlv32 载荷同时携带命令与沙箱包名），仅 C++ 世代 daemon 支持。</summary>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage(
+        "Naming", "CA1711:Identifiers should not have incorrect suffix", Justification = "对齐上游命令字 CMD_UNITY_EXECUTE_EX")]
+    UnityExecuteEx = 1200,
+
     /// <summary>宿主→daemon 系统分区重挂载请求。</summary>
     UnityRemount = 1002,
 
