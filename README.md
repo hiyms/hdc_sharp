@@ -179,12 +179,23 @@ API 文档直接由源码中的中文 XML 文档注释生成，**不存在手写
 # 生成本地站点 → artifacts/docs（内部会先 dotnet tool restore）
 pwsh -File scripts/build-docs.ps1
 
-# 本地预览（默认 http://localhost:8080）
-pwsh -File scripts/build-docs.ps1 -Serve
+# 本地预览（默认 http://localhost:8080）；-OpenBrowser 顺带打开浏览器
+pwsh -File scripts/build-docs.ps1 -Serve -OpenBrowser
 
 # 干净重建（先删 api/ 与 artifacts/docs/）
 pwsh -File scripts/build-docs.ps1 -Clean
 ```
+
+> **必须经 HTTP 访问，不能双击 HTML**：docfx 2.78 的 modern 与 classic 模板都把顶部导航、左侧栏与搜索放在运行时——
+> 由 JS 读取 `<meta name="docfx:navrel|tocrel">` 再 `fetch` 对应的 `toc.json` / `index.json` 渲染
+> （`templates/modern/public/docfx.min.js`、`templates/default/styles/docfx.js` 的 `loadNavbar()`）。
+> 浏览器禁止 `file://` 页面发起 `fetch`（实测报 `TypeError: Failed to fetch`），因此直接双击 `index.html`
+> 只会看到正文与样式，**没有导航与左侧栏**。用 `-Serve`，或对产物目录起任意静态服务器：
+>
+> ```bash
+> python -m http.server 8080 --directory artifacts/docs
+> npx --yes serve artifacts/docs -l 8080
+> ```
 
 - 模板：`default` + `modern`（与 docfx 官网同款：**全站常驻左侧栏**、响应式、暗色主题、搜索），叠加自定义层 `templates/hdcsharp-zh/` 提供中文 UI（`token.json` 词条 + `partials/title.tmpl.partial` 覆盖 API 页标题如「HdcHost 类」）
 - 导航：`toc.yml` = 顶部导航（不含首页——首页由导航栏品牌进入，与 docfx 官网一致）；`site/toc.yml` = 首页与 README 的左侧栏；`docs/toc.yml` = 设计文档分区

@@ -6,11 +6,16 @@
 #   pwsh -File scripts/build-docs.ps1            # 构建
 #   pwsh -File scripts/build-docs.ps1 -Serve     # 构建后本地预览（Ctrl+C 结束）
 #   pwsh -File scripts/build-docs.ps1 -Clean     # 先删产物再构建
+#   pwsh -File scripts/build-docs.ps1 -Serve -OpenBrowser          # 预览并自动打开浏览器
 [CmdletBinding()]
 param(
     [switch]$Clean,
     [switch]$Serve,
-    [int]$Port = 8080
+    [int]$Port = 8080,
+    # docfx 2.78 的 modern 与 classic 模板都把顶部导航/左侧栏放在运行时，
+    # 由 JS 读取 <meta name="docfx:navrel|tocrel"> 后 fetch toc.json 渲染；
+    # 浏览器禁止 file:// 页面发起 fetch，故站点**必须经 HTTP 打开**（见脚本末尾提示）
+    [switch]$OpenBrowser
 )
 
 $ErrorActionPreference = 'Stop'
@@ -50,9 +55,9 @@ try {
         'index.json',
         'api/toc.html',
         'api/HdcSharp.HdcHost.html',
-        'api/HdcSharp.HdcDevice.html',
-        'site/readme-full.html'
+        'api/HdcSharp.HdcDevice.html'
     )
+    $required += 'site/readme-full.html'
     foreach ($file in $required) {
         if (-not (Test-Path (Join-Path $siteDir $file))) { throw "缺少产物 $siteDir/$file" }
     }
@@ -65,9 +70,15 @@ try {
 
     $pages = (Get-ChildItem $siteDir -Recurse -Filter '*.html').Count
     Write-Host "文档站点已生成：$siteDir（$pages 个 HTML 页面，其中 API 页 $apiPages 个 / 公共类型 $publicTypes 个）" -ForegroundColor Green
+    Write-Host "注意：站点必须经 HTTP 访问。顶部导航/左侧栏/搜索都由 JS 在运行时 fetch toc.json、index.json 得到，" -ForegroundColor Yellow
+    Write-Host "      而浏览器禁止 file:// 页面发起 fetch（会报 TypeError: Failed to fetch），直接双击 HTML 只会看到正文、没有导航与侧栏。" -ForegroundColor Yellow
+    Write-Host "      预览方式：本脚本加 -Serve；或对 $siteDir 起任意静态服务器，例如" -ForegroundColor Yellow
+    Write-Host "        python -m http.server $Port --directory $siteDir" -ForegroundColor Yellow
+    Write-Host "        npx --yes serve $siteDir -l $Port" -ForegroundColor Yellow
 
     if ($Serve) {
         Write-Host "本地预览：http://localhost:$Port/（Ctrl+C 结束）" -ForegroundColor Cyan
+        if ($OpenBrowser) { Start-Process "http://localhost:$Port/" }
         dotnet docfx serve $siteDir --port $Port
     }
 }
